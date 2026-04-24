@@ -16,6 +16,24 @@ Avant toute story, l'agent doit avoir lu :
 **Règle d'or** : aucune implémentation simulée, aucun mock d'intégration tierce.
 Tout appel réseau doit être testé contre les APIs réelles.
 
+### Décisions de cohérence (à appliquer par toutes les stories)
+
+1. **Cap tool calls par tour = 5** (conformément à §5.3 et §14.3 C4 du
+   cahier). §4 mentionne 10 — c'est une erreur à corriger dans le
+   cahier au passage. Les stories figent **5** (`guardrails/caps.py`).
+2. **Tool schemas** : unique point d'entrée
+   `mcp_pappers.to_anthropic_schema(tools)` (S02). Consommé par S03.
+3. **Stats** : les compteurs sont instrumentés au call-site (S07 liste
+   explicitement les call-sites dans `agent.py`, `routing.py`,
+   `mcp_pappers.py`).
+4. **Mode dégradé cache-only** : déclenché par
+   `observability/credit_guard.degraded()` (S07), qui lit
+   `DAILY_PAPPERS_CREDITS_CAP` depuis `guardrails/caps.py` (S05) et
+   `stats.pappers_calls_today()` (S07). Le cache tool-level est en S02
+   (`mcp_cache.py` TTL 24 h).
+5. **Unique `@cl.on_chat_start`** : S06 le crée, S10 l'étend (pas de
+   redéfinition).
+
 ---
 
 ## Workflow à 3 agents par story
@@ -111,30 +129,49 @@ repasser par le dev agent.
 À cocher au fur et à mesure que tu (Lancelot) fournis chaque élément.
 **Aucune story ne démarre tant que ses inputs ne sont pas cochés ici.**
 
+### ✅ Déjà fourni dans `.env` local (2026-04-24)
+
+Le fichier `/home/lancelot/projects/genial-agent/.env` est présent et
+**gitignoré** (validé : `git check-ignore .env` matche la ligne 2 du
+`.gitignore`). Les 3 clés ont été testées end-to-end et sont
+opérationnelles.
+
+- [x] `ANTHROPIC_API_KEY` — testée OK sur `claude-sonnet-4-6` **et**
+      `claude-haiku-4-5` (résolu vers `claude-haiku-4-5-20251001`).
+      `inference_geo=global` côté Sonnet.
+- [x] `PAPPERS_API_KEY` — handshake MCP OK, protocole `2024-11-05`,
+      **31 tools exposés**. Liste détaillée dans
+      [`S02-mcp-pappers.md`](./S02-mcp-pappers.md).
+- [x] `ELEVENLABS_API_KEY` — tier `growing_business`, quota
+      5 922 075 chars/mois (largement au-dessus des ~5 000 attendus).
+- [x] Constantes publiques (`ELEVENLABS_VOICE_GAELLE`,
+      `ELEVENLABS_VOICE_GUILLAUME`, `ELEVENLABS_MODEL_ID`,
+      `ENABLE_VOICE_BRIEF=false`, `LOG_LEVEL=INFO`) en place.
+
 ### Avant S01 (fondation)
 
 - [ ] Python 3.11+ installé localement (`python --version`).
 - [ ] `uv` installé (`pip install uv` ou installeur officiel).
 - [ ] Docker installé (test image locale avant Railway).
-- [ ] `ANTHROPIC_API_KEY` fournie dans `.env` local.
-- [ ] `PAPPERS_API_KEY` fournie dans `.env` local (adresse email **pro**
-      requise chez Pappers, pas de Gmail).
 
 ### Avant S08 (déploiement)
 
 - [ ] Compte Railway créé (GitHub SSO OK), repo `Bakajanai69/genial-agent`
       lié comme projet.
 - [ ] Region EU-West (Amsterdam) confirmée dans le projet Railway.
-- [ ] Toutes les variables d'env du `.env.example` ajoutées dans Railway
-      Project Variables.
+- [ ] **Recopier** toutes les variables du `.env` local dans Railway
+      Project Variables (identiques à celles déjà validées localement).
 - [ ] Compte UptimeRobot créé (plan free) + URL `/health` du déploiement
       Railway configurée en ping 5 min.
 
 ### Avant S10 (stretch vocal — optionnel)
 
 - [ ] MVP vert samedi soir (gating §19.1 du cahier des charges respecté).
-- [ ] `ELEVENLABS_API_KEY` fournie dans `.env`.
-- [ ] Solde crédits ElevenLabs vérifié (≥ 5 000 chars disponibles).
+- [x] `ELEVENLABS_API_KEY` fournie dans `.env` (cf. plus haut).
+- [x] Solde crédits ElevenLabs vérifié (tier `growing_business`, quota
+      mensuel 5.9 M chars).
+- [ ] Passer `ENABLE_VOICE_BRIEF=true` dans `.env` local + Railway après
+      merge S10 + gating vert.
 
 ### Optionnel
 

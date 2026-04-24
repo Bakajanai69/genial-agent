@@ -22,13 +22,23 @@ Résultat attendu : on peut cloner, `make install`, `make lint`, `make test`
 
 ## 🔒 Prérequis
 
-- [ ] Repo cloné localement sur la branche `claude/builder-evaluation-exercise-34Iyu`.
+- [x] Repo cloné localement sur la branche `claude/builder-evaluation-exercise-34Iyu`.
+- [x] `.env` à la racine **déjà rempli** avec les 3 clés API
+      (ANTHROPIC, PAPPERS, ELEVENLABS) et gitignoré — cf. check-list
+      globale dans `docs/stories/README.md`.
+- [x] `.gitignore` racine déjà présent (a été créé pré-S01 pour
+      protéger le `.env`). À ne pas écraser lors de la phase 2 : le
+      compléter si besoin, ne pas le recréer.
 
 ## 🔑 Inputs utilisateur requis
 
 - [ ] Python 3.11 ou 3.12 installé (`python --version`).
 - [ ] `uv` installé (`pip install uv` ou installer officiel).
 - [ ] Docker installé (pour tester l'image localement plus tard).
+
+> ℹ️ Les 3 clés API sont **déjà provisionnées** dans `.env`. La phase 2
+> crée `.env.example` (valeurs vides, committé) en miroir du `.env`
+> mais ne touche pas à ce dernier.
 
 ---
 

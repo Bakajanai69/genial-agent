@@ -36,11 +36,29 @@ Sources de vérité :
 ### Dans le scope
 
 - `src/genial_agent/observability/logging.py` : config `structlog` JSON,
-  processor PII scrub.
+  processor PII scrub, **injection du `request_id` Anthropic** via
+  contextvar.
 - `src/genial_agent/observability/idempotence.py` : cache LRU TTL pour
   déduplication par `(session_id, sha256(message))`.
 - `src/genial_agent/observability/stats.py` : compteurs cumulatifs
-  (tokens, appels MCP, coût).
+  (tokens, appels MCP, coût) **+ appels MCP du jour** pour
+  l'enforcement du cap journalier (cahier §17.2).
+- `src/genial_agent/observability/credit_guard.py` : mode dégradé
+  cache-only quand `DAILY_PAPPERS_CREDITS_CAP` est atteint.
+- **Instrumentation des call-sites** :
+  - `src/genial_agent/mcp_pappers.py` : `stats.incr(total_tool_calls=1,
+    pappers_calls_today=1)` avant `call_tool`, check `credit_guard`.
+  - `src/genial_agent/agent.py` / `routing.py` : `stats.incr(
+    total_turns=1, anthropic_input_tokens=X, anthropic_output_tokens=Y)`
+    après chaque appel LLM.
+  - Capture du `request_id` depuis les headers Anthropic et bind dans
+    `structlog.contextvars`.
+- **Intégration dans `src/genial_agent/app.py`** (modif) :
+  - Check idempotence `(session_id, sha256(message))` avant de lancer
+    `run_routed_turn` ; si hit dans les 60 s, renvoyer la réponse
+    cached.
+  - Montage des routes `/health` et `/stats` via le hook Starlette
+    Chainlit.
 - Endpoint `/health` et `/stats` ajoutés en parallèle de Chainlit (via
   route Starlette / FastAPI).
 
@@ -84,14 +102,21 @@ Sources de vérité :
 
 ## 🛠 Phase 2 — Dev Agent
 
-### Fichiers à créer
+### Fichiers à créer / modifier
 
 - `src/genial_agent/observability/__init__.py`
 - `src/genial_agent/observability/logging.py`
 - `src/genial_agent/observability/idempotence.py`
 - `src/genial_agent/observability/stats.py`
+- `src/genial_agent/observability/credit_guard.py` (mode dégradé).
 - `src/genial_agent/observability/routes.py` (ajoute `/health`, `/stats`).
-- Modif `src/genial_agent/app.py` pour initialiser logging + routes.
+- **Modif `src/genial_agent/app.py`** : init logging + montage routes
+  + check idempotence + bandeau crédits bas (cahier §16.3).
+- **Modif `src/genial_agent/mcp_pappers.py`** : `stats.incr(pappers_...
+  )` et check `credit_guard.degraded()` avant chaque `call_tool`.
+- **Modif `src/genial_agent/agent.py`** : capturer `request_id` +
+  tokens depuis la réponse Anthropic, `stats.incr(...)`, bind
+  `structlog.contextvars.bind_contextvars(request_id=...)`.
 
 ### `logging.py`
 
@@ -205,6 +230,7 @@ class Stats:
     total_turns: int = 0
     total_tool_calls: int = 0
     pappers_calls_today: int = 0
+    pappers_calls_today_day: str = field(default_factory=lambda: datetime.utcnow().strftime("%Y-%m-%d"))
     anthropic_input_tokens: int = 0
     anthropic_output_tokens: int = 0
     errors: int = 0
@@ -214,23 +240,59 @@ _stats = Stats()
 _lock = asyncio.Lock()
 
 
+async def _rollover_day_if_needed() -> None:
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    if _stats.pappers_calls_today_day != today:
+        _stats.pappers_calls_today = 0
+        _stats.pappers_calls_today_day = today
+
+
 async def incr(**kwargs: int) -> None:
     async with _lock:
+        await _rollover_day_if_needed()
         for k, v in kwargs.items():
             setattr(_stats, k, getattr(_stats, k) + v)
 
 
 async def snapshot() -> dict[str, int | str]:
     async with _lock:
+        await _rollover_day_if_needed()
         return {
             "started_at": _stats.started_at,
             "total_turns": _stats.total_turns,
             "total_tool_calls": _stats.total_tool_calls,
             "pappers_calls_today": _stats.pappers_calls_today,
+            "pappers_calls_today_day": _stats.pappers_calls_today_day,
             "anthropic_input_tokens": _stats.anthropic_input_tokens,
             "anthropic_output_tokens": _stats.anthropic_output_tokens,
             "errors": _stats.errors,
         }
+
+
+async def pappers_calls_today() -> int:
+    async with _lock:
+        await _rollover_day_if_needed()
+        return _stats.pappers_calls_today
+```
+
+### `credit_guard.py`
+
+```python
+"""Mode dégradé cache-only quand le cap crédits Pappers journalier
+est atteint (cahier §17.2, R1, R16)."""
+from __future__ import annotations
+
+from genial_agent.guardrails.caps import DAILY_PAPPERS_CREDITS_CAP
+from genial_agent.observability.stats import pappers_calls_today
+
+
+async def degraded() -> bool:
+    """True si on doit servir uniquement depuis le cache MCP (S02)."""
+    return await pappers_calls_today() >= DAILY_PAPPERS_CREDITS_CAP
+
+
+async def remaining() -> int:
+    return max(0, DAILY_PAPPERS_CREDITS_CAP - await pappers_calls_today())
 ```
 
 ### `routes.py`
@@ -259,6 +321,72 @@ async def stats(request: Request) -> JSONResponse:  # noqa: ARG001
 
 Ajouter l'enregistrement des routes au démarrage — pattern Chainlit 2026
 à confirmer en phase 1 (via `cl.app` ou `fastapi_app()`).
+
+Points précis à ajouter dans `on_message` :
+
+```python
+from genial_agent.observability import idempotence, credit_guard
+from genial_agent.guardrails.caps import DAILY_PAPPERS_CREDITS_CAP
+
+session_id = cl.user_session.get("id") or "anonymous"
+
+# 1. Idempotence — avant tout appel LLM / MCP
+cached = await idempotence.cache.get(session_id, message.content)
+if cached is not None:
+    await cl.Message(content=cached + "\n\n_(réponse idempotence cache)_", author="Agent").send()
+    return
+
+# 2. Bandeau mode dégradé si crédits bas (<10 % restants)
+remaining = await credit_guard.remaining()
+if remaining < 0.1 * DAILY_PAPPERS_CREDITS_CAP:
+    await cl.Message(
+        content=f"⚠ Budget Pappers dégradé — reste {remaining} appels. Mode cache-only sur les entités connues.",
+        author="Système",
+    ).send()
+
+# ... pipeline normal ...
+
+# 3. Après la réponse — stocker pour idempotence
+await idempotence.cache.set(session_id, message.content, msg.content)
+```
+
+### Modif `agent.py` (capture request_id + tokens)
+
+```python
+import structlog.contextvars
+
+# Dans run_turn, après chaque appel Anthropic :
+request_id = response.id  # ou extraire du header selon SDK 2026
+structlog.contextvars.bind_contextvars(
+    request_id=request_id,
+    session_id=state.session_id,
+)
+await stats.incr(
+    total_turns=1,
+    anthropic_input_tokens=response.usage.input_tokens,
+    anthropic_output_tokens=response.usage.output_tokens,
+)
+yield {
+    "type": "llm_meta",
+    "request_id": request_id,
+    "input_tokens": response.usage.input_tokens,
+    "output_tokens": response.usage.output_tokens,
+}
+```
+
+### Modif `mcp_pappers.call_tool`
+
+```python
+# Avant chaque appel réseau :
+if await credit_guard.degraded():
+    cached = await mcp_cache.cache.get(name, args)
+    if cached is not None:
+        return cached
+    raise CreditsExhausted(f"daily cap reached, no cache for {name}")
+
+await stats.incr(total_tool_calls=1, pappers_calls_today=1)
+# ... appel réseau + retry tenacity ...
+```
 
 ### Tests à produire
 
@@ -298,6 +426,19 @@ async def test_stats_increment_and_snapshot():
     after = await snapshot()
     assert after["total_turns"] == before["total_turns"] + 1
     assert after["total_tool_calls"] == before["total_tool_calls"] + 3
+
+
+async def test_credit_guard_not_degraded_initially():
+    from genial_agent.observability import credit_guard
+    assert await credit_guard.degraded() is False
+
+
+async def test_credit_guard_degraded_after_cap(monkeypatch):
+    from genial_agent.observability import credit_guard, stats as s
+    from genial_agent.guardrails.caps import DAILY_PAPPERS_CREDITS_CAP
+    # simule cap atteint
+    monkeypatch.setattr(s, "_stats", type(s._stats)(pappers_calls_today=DAILY_PAPPERS_CREDITS_CAP))
+    assert await credit_guard.degraded() is True
 ```
 
 #### Logging
@@ -331,7 +472,19 @@ def test_pii_scrubbed_in_log_output(capsys):
 ### Check-list spécifique
 
 - [ ] `/health` retourne `{"status": "ok", ...}` en local (curl test).
-- [ ] `/stats` retourne un JSON avec les compteurs.
+- [ ] `/stats` retourne un JSON avec les compteurs **non nuls après un
+      premier tour** (preuve que les call-sites instrumentent).
+- [ ] `stats.incr(pappers_calls_today=1)` est bien appelé dans
+      `mcp_pappers.call_tool`.
+- [ ] `stats.incr(total_turns=1, anthropic_..._tokens=...)` est appelé
+      dans `agent.run_turn`.
+- [ ] `structlog.contextvars` bind `request_id` et apparaît dans les
+      logs JSON de la turn.
+- [ ] `credit_guard.degraded()` déclenche bien le mode cache-only dans
+      `call_tool`.
+- [ ] Bandeau UI "crédits bas" apparaît quand `remaining < 10 %`.
+- [ ] Rollover jour : `pappers_calls_today` revient à 0 quand la date
+      change.
 - [ ] Tous les logs applicatifs passent par `structlog`, pas de `print`
       résiduel.
 - [ ] Le PII processor scrub bien les champs string (test unitaire vert).
@@ -348,10 +501,15 @@ def test_pii_scrubbed_in_log_output(capsys):
 ## ✅ Critères d'acceptation
 
 - [ ] `curl http://localhost:8000/health` → 200 + JSON avec status.
-- [ ] `curl http://localhost:8000/stats` → 200 + JSON compteurs.
-- [ ] Logs en JSON valide ligne par ligne.
+- [ ] `curl http://localhost:8000/stats` → 200 + JSON compteurs
+      **non vides** après un turn réel (fiche LVMH).
+- [ ] Logs en JSON valide ligne par ligne avec `request_id` quand un
+      appel Anthropic a eu lieu.
 - [ ] Idempotence : 2 appels identiques rapprochés ne créent qu'un seul
       appel MCP (à valider en S06+S07 intégré).
+- [ ] Mode dégradé : en forçant `DAILY_PAPPERS_CREDITS_CAP=1` et en
+      faisant 2 requêtes, la 2e tombe en cache-only ou lève
+      `CreditsExhausted` proprement côté UI.
 - [ ] `gitleaks` clean.
 
 ---

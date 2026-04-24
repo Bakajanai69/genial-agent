@@ -38,8 +38,14 @@ Sources de vérité :
 - Post-processing : SIREN → lien cliquable vers `pappers.fr/entreprise/{siren}`.
 - Affichage date de bilan à côté des chiffres (conditionné au format de
   sortie de l'agent).
-- Bannière "Entité active: ..." pour multi-turn.
+- **Bannière "Entité active: NOM (SIREN ...)" épinglée** (cahier §16.2)
+  — extraction automatique après chaque turn, mise à jour via un message
+  dédié stocké dans `cl.user_session`.
 - Badge score confiance (vert/orange/rouge) après critic async.
+- **Task critic tracée dans `cl.user_session`** (pas d'orphan
+  `asyncio.create_task`) — annulation propre à la fin de la session.
+- **Tool results rattachés à leur `cl.Step`** (input + output visibles
+  quand l'utilisateur déplie).
 - Footer RGPD permanent.
 - États d'erreur UX : MCP KO, cap atteint, crédits bas.
 
@@ -89,9 +95,12 @@ Sources de vérité :
 - `src/genial_agent/ui/post_process.py` — SIREN clickable, date
   highlight.
 - `src/genial_agent/ui/starters.py` — définition des 4 starters.
+- `src/genial_agent/ui/entity_tracker.py` — extraction + mise à jour
+  de l'entité active.
 - `chainlit.md` (si pertinent, pour l'empty state de base).
 - `public/` pour le footer et custom CSS si nécessaire.
 - `tests/unit/test_S06_post_process.py`
+- `tests/unit/test_S06_entity_tracker.py`
 
 ### `ui/starters.py`
 
@@ -141,6 +150,55 @@ def linkify_sirens(text: str) -> str:
     )
 ```
 
+### `ui/entity_tracker.py`
+
+```python
+"""Extraction de l'entité active pour la bannière multi-turn (§16.2)."""
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+
+SIREN_RE = re.compile(r"\b(\d{9})\b")
+
+
+@dataclass(frozen=True)
+class ActiveEntity:
+    name: str
+    siren: str
+
+
+def extract_active_entity(
+    tool_results: list[dict],
+    fallback_name: str | None = None,
+) -> ActiveEntity | None:
+    """Scanne les tool_results pour le SIREN + nom de la dernière entité
+    récupérée. Priorité au dernier `get_company` de la turn.
+
+    Chaque tool_result est un dict typé `{"name": tool, "result": {...}}`
+    tel que yield par S03 dans l'event `tool_result`.
+    """
+    for item in reversed(tool_results):
+        result = item.get("result") or {}
+        siren = result.get("siren") or result.get("siren_formatted")
+        name = result.get("denomination") or result.get("nom_entreprise") or result.get("name")
+        if siren and name:
+            return ActiveEntity(name=str(name), siren=str(siren))
+    # Fallback : SIREN détecté dans le texte d'un tool_result
+    for item in reversed(tool_results):
+        raw = str(item.get("result") or "")
+        m = SIREN_RE.search(raw)
+        if m:
+            return ActiveEntity(name=fallback_name or "(entité)", siren=m.group(1))
+    return None
+
+
+def format_banner(entity: ActiveEntity | None) -> str | None:
+    if entity is None:
+        return None
+    return f"📌 **Entité active** : {entity.name} (SIREN [{entity.siren}](https://www.pappers.fr/entreprise/{entity.siren}))"
+```
+
 ### `app.py` — squelette
 
 ```python
@@ -178,6 +236,9 @@ async def starters() -> list[cl.Starter]:
 async def on_start() -> None:
     state = ConversationState()
     cl.user_session.set("state", state)
+    cl.user_session.set("entity_banner_msg", None)
+    cl.user_session.set("critic_tasks", set())
+    cl.user_session.set("tool_results", [])
     # Healthcheck MCP Pappers en parallèle, badge UI si KO
     health = await mcp_pappers.healthcheck()
     if health["status"] != "ok":
@@ -185,6 +246,15 @@ async def on_start() -> None:
             content="🔴 **Données Pappers indisponibles.** Réessaie dans un instant.",
             author="Système",
         ).send()
+
+
+@cl.on_chat_end
+async def on_end() -> None:
+    """Annule proprement les tâches critic encore en cours."""
+    tasks: set[asyncio.Task] = cl.user_session.get("critic_tasks") or set()
+    for t in tasks:
+        if not t.done():
+            t.cancel()
 
 
 @cl.on_message
@@ -204,35 +274,77 @@ async def on_message(message: cl.Message) -> None:
     msg = cl.Message(content="", author="Agent")
     await msg.send()
 
+    tool_results: list[dict] = cl.user_session.get("tool_results") or []
+    current_step: cl.Step | None = None
+    current_tool_name: str | None = None
+
     model_used = "haiku"
     escalated = False
     async for event in run_routed_turn(state, message.content):
-        if event.get("type") == "text":
+        ev_type = event.get("type")
+        if ev_type == "text":
             await msg.stream_token(linkify_sirens(event["content"]))
-        elif event.get("type") == "tool_use":
-            async with cl.Step(name=f"🔧 {event.get('name', 'tool')}") as step:
-                step.input = event.get("input", {})
-        elif event.get("type") == "tool_result":
-            # Afficher dans l'étape courante
-            pass
-        elif event.get("type") == "routing_done":
+        elif ev_type == "tool_use":
+            current_tool_name = event.get("name", "tool")
+            current_step = cl.Step(name=f"🔧 {current_tool_name}", default_open=True)
+            await current_step.__aenter__()
+            current_step.input = event.get("input", {})
+        elif ev_type == "tool_result":
+            # Rattache le résultat à la step ouverte
+            if current_step is not None:
+                current_step.output = event.get("result")
+                await current_step.__aexit__(None, None, None)
+            current_step = None
+            tool_results.append({"name": current_tool_name, "result": event.get("result")})
+        elif ev_type == "routing_done":
             model_used = event["model_used"]
             escalated = event["escalated"]
-        elif event.get("type") == "escalation":
-            await cl.Message(content="⚡→🧠 Escalade vers Sonnet : " + event["reason"], author="Routing").send()
-        elif event.get("type") == "capped":
-            await cl.Message(content=f"🛑 Cap atteint : {event['reason']}. Ouvre une nouvelle conversation pour continuer.", author="Système").send()
+        elif ev_type == "escalation":
+            await cl.Message(
+                content="⚡→🧠 Escalade vers Sonnet : " + event["reason"],
+                author="Routing",
+            ).send()
+        elif ev_type == "capped":
+            await cl.Message(
+                content=f"🛑 Cap atteint : {event['reason']}. Ouvre une nouvelle conversation pour continuer.",
+                author="Système",
+            ).send()
+
+    cl.user_session.set("tool_results", tool_results)
 
     # Badge modèle en fin de message
     badge = "⚡→🧠 Sonnet (via escalade)" if escalated else ("🧠 Sonnet" if model_used == "sonnet" else "⚡ Haiku")
     msg.content += f"\n\n---\n*Modèle : {badge}*"
     await msg.update()
 
+    # Bannière entité active (§16.2)
+    entity = extract_active_entity(tool_results)
+    await _update_entity_banner(entity)
+
     # Footer RGPD
     await cl.Message(content=FOOTER, author="").send()
 
-    # Critic async non-bloquant
-    asyncio.create_task(_run_critic_and_update(msg, message.content))
+    # Critic async non-bloquant, tracé dans cl.user_session
+    task = asyncio.create_task(_run_critic_and_update(msg, message.content))
+    tasks: set[asyncio.Task] = cl.user_session.get("critic_tasks") or set()
+    tasks.add(task)
+    task.add_done_callback(tasks.discard)
+    cl.user_session.set("critic_tasks", tasks)
+
+
+async def _update_entity_banner(entity) -> None:  # entity: ActiveEntity | None
+    """Crée ou met à jour un message épinglé portant la bannière §16.2."""
+    content = format_banner(entity)
+    if content is None:
+        return
+    existing: cl.Message | None = cl.user_session.get("entity_banner_msg")
+    if existing is None:
+        banner = cl.Message(content=content, author="Contexte")
+        await banner.send()
+        cl.user_session.set("entity_banner_msg", banner)
+    else:
+        existing.content = content
+        await existing.update()
 
 
 async def _run_critic_and_update(msg: cl.Message, question: str) -> None:
@@ -245,9 +357,15 @@ async def _run_critic_and_update(msg: cl.Message, question: str) -> None:
             badge += f" · Issues : {', '.join(result.issues[:3])}"
         msg.content += badge
         await msg.update()
+    except asyncio.CancelledError:
+        raise  # propage si la session est fermée
     except Exception as exc:  # noqa: BLE001
         logger.warning("critic_failed", error=str(exc))
 ```
+
+> ⚠️ **Note d'intégration** : les imports `extract_active_entity` et
+> `format_banner` viennent de `genial_agent.ui.entity_tracker`.
+> À ajouter en tête de fichier.
 
 ### Tests à produire
 
@@ -283,6 +401,35 @@ def test_siren_inside_longer_number_not_matched():
     assert "pappers.fr" not in out
 ```
 
+```python
+# tests/unit/test_S06_entity_tracker.py
+from genial_agent.ui.entity_tracker import extract_active_entity, format_banner
+
+
+def test_extract_latest_company_result():
+    tool_results = [
+        {"name": "search_company", "result": {"siren": "111111111", "denomination": "AAA"}},
+        {"name": "get_company", "result": {"siren": "775670417", "denomination": "LVMH"}},
+    ]
+    entity = extract_active_entity(tool_results)
+    assert entity.siren == "775670417"
+    assert entity.name == "LVMH"
+
+
+def test_extract_none_when_no_data():
+    assert extract_active_entity([]) is None
+
+
+def test_format_banner_shape():
+    from genial_agent.ui.entity_tracker import ActiveEntity
+    b = format_banner(ActiveEntity(name="LVMH", siren="775670417"))
+    assert "LVMH" in b and "775670417" in b and "pappers.fr" in b
+
+
+def test_format_banner_none():
+    assert format_banner(None) is None
+```
+
 ### Tests manuels (documentés)
 
 Le UI Chainlit ne se teste pas automatiquement facilement. Documenter
@@ -313,6 +460,12 @@ dans la story le script manuel :
       > 9 chiffres (test paramétré).
 - [ ] Le critic async ne bloque jamais le flow principal — erreur
       silencieuse + log.
+- [ ] Tâches critic : stockées dans `cl.user_session["critic_tasks"]`,
+      annulées proprement par `@cl.on_chat_end`.
+- [ ] Bannière "Entité active" s'affiche dès qu'un SIREN + nom sont
+      résolus, se met à jour (pas de spam de messages).
+- [ ] `tool_result` : chaque step `cl.Step` est fermée avec
+      `step.output` renseigné.
 - [ ] Footer RGPD présent et avec lien vers le repo GitHub.
 - [ ] États fallback (MCP KO, cap) s'affichent avec le bon emoji / couleur.
 
@@ -329,6 +482,11 @@ dans la story le script manuel :
 - [ ] Les 3 tests officiels Pappers (LVMH, BNP, Carrefour) fonctionnent.
 - [ ] SIREN cliquables dans les réponses.
 - [ ] Badge modèle correct selon la requête.
+- [ ] Bannière "Entité active: LVMH (SIREN 775670417)" apparaît après
+      une requête sur LVMH, puis se met à jour (pas re-émise) au turn
+      suivant.
+- [ ] Au moins un `cl.Step` ouvre par défaut et affiche input + output
+      du tool call visible.
 - [ ] Bannière MCP KO apparaît quand la clé Pappers est invalide.
 - [ ] `gitleaks` clean.
 

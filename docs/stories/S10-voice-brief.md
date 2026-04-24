@@ -34,12 +34,15 @@ Aucun écart toléré. Cocher avant de démarrer :
 
 ## 🔑 Inputs utilisateur requis
 
-- [ ] `ELEVENLABS_API_KEY` fournie et active.
-- [ ] Solde crédits ElevenLabs ≥ 5 000 chars (vérifié sur leur dashboard).
-- [ ] `ELEVENLABS_VOICE_GAELLE=tKaoyJLW05zqV0tIH9FD` dans `.env` (déjà
-      en S01).
-- [ ] `ELEVENLABS_VOICE_GUILLAUME=ohItIVrXTBI80RrUECOD` dans `.env`.
-- [ ] `ENABLE_VOICE_BRIEF=true` dans Railway (et `.env` local).
+- [x] `ELEVENLABS_API_KEY` fournie et active (probe 2026-04-24).
+- [x] Solde crédits ElevenLabs vérifié : tier `growing_business`,
+      quota mensuel **5 922 075 chars** (largement au-dessus du seuil
+      5 000). Marge confortable même en cas de démo intensive.
+- [x] `ELEVENLABS_VOICE_GAELLE=tKaoyJLW05zqV0tIH9FD` dans `.env`.
+- [x] `ELEVENLABS_VOICE_GUILLAUME=ohItIVrXTBI80RrUECOD` dans `.env`.
+- [ ] `ENABLE_VOICE_BRIEF=true` dans Railway (et `.env` local) —
+      **à flipper uniquement après** merge de S10 + gating §19.1 vert.
+      Aujourd'hui la valeur est `false`.
 
 ---
 
@@ -341,34 +344,90 @@ cl.Starter(
 ),
 ```
 
-Settings Chainlit :
+Settings Chainlit — **merge dans `on_start` existant créé par S06**
+(⚠ ne pas redéclarer `@cl.on_chat_start` : il ne peut être décoré
+qu'une seule fois). Le patch à appliquer à `src/genial_agent/app.py`
+est additif :
+
 ```python
+# src/genial_agent/app.py — MODIFIER la fonction on_start existante
 @cl.on_chat_start
-async def on_start():
-    await cl.ChatSettings([
-        cl.input_widget.Switch(id="voice_brief", label="🔊 Brief vocal", initial=False),
-        cl.input_widget.Select(
-            id="voice",
-            label="Voix",
-            values=["Gaëlle", "Guillaume"],
-            initial_index=0,
-        ),
-    ]).send()
+async def on_start() -> None:
+    # --- conservé de S06 ---
+    state = ConversationState()
+    cl.user_session.set("state", state)
+    cl.user_session.set("entity_banner_msg", None)
+    cl.user_session.set("critic_tasks", set())
+    cl.user_session.set("tool_results", [])
+
+    # --- AJOUT S10 : settings vocal ---
+    cl.user_session.set("voice_fallback", VoiceFallback())
+    cl.user_session.set("voice_brief_enabled", False)
+    cl.user_session.set("voice_choice", "Gaëlle")
+    if settings.ENABLE_VOICE_BRIEF:
+        await cl.ChatSettings([
+            cl.input_widget.Switch(id="voice_brief", label="🔊 Brief vocal", initial=False),
+            cl.input_widget.Select(
+                id="voice",
+                label="Voix",
+                values=["Gaëlle", "Guillaume"],
+                initial_index=0,
+            ),
+        ]).send()
+
+    # --- conservé de S06 : healthcheck ---
+    health = await mcp_pappers.healthcheck()
+    if health["status"] != "ok":
+        await cl.Message(
+            content="🔴 **Données Pappers indisponibles.** Réessaie dans un instant.",
+            author="Système",
+        ).send()
+
+
+@cl.on_settings_update
+async def on_settings_update(settings_payload: dict) -> None:
+    cl.user_session.set("voice_brief_enabled", bool(settings_payload.get("voice_brief", False)))
+    cl.user_session.set("voice_choice", settings_payload.get("voice", "Gaëlle"))
 ```
 
-Après chaque réponse, si toggle ON et pas disabled par fallback :
+Après chaque réponse — **ajout à la fin de `on_message`** (après le
+footer RGPD, après le lancement du critic async) :
+
 ```python
-script = await briefer.generate_brief(question=message.content, response=msg.content)
-# Afficher transcription (WCAG)
-await cl.Message(content=f"📻 **Brief audio** : _{script}_", author="Brief").send()
-try:
-    voice_id = settings.ELEVENLABS_VOICE_GAELLE if voice == "Gaëlle" else settings.ELEVENLABS_VOICE_GUILLAUME
-    audio, cached = await tts.synthesize(script, voice_id)
-    await cl.Audio(content=audio, mime="audio/mpeg", auto_play=True, display="inline").send()
-    fallback.record_success()
-except tts.ElevenLabsError as exc:
-    fallback.record_failure()
-    await cl.Message(content=f"🔇 Brief vocal indisponible : {type(exc).__name__}", author="Voice").send()
+# src/genial_agent/app.py — AJOUT à la fin de on_message existant
+if cl.user_session.get("voice_brief_enabled"):
+    fallback = cl.user_session.get("voice_fallback")
+    if fallback and fallback.disabled:
+        await cl.Message(
+            content="🔇 Mode vocal temporairement coupé. Réactive-le dans les paramètres.",
+            author="Voice",
+        ).send()
+    else:
+        script = await briefer.generate_brief(
+            question=message.content, response=msg.content
+        )
+        await cl.Message(
+            content=f"📻 **Brief audio** _(transcription)_ :\n\n_{script}_",
+            author="Brief",
+        ).send()
+        try:
+            voice_name = cl.user_session.get("voice_choice", "Gaëlle")
+            voice_id = (
+                settings.ELEVENLABS_VOICE_GAELLE
+                if voice_name == "Gaëlle"
+                else settings.ELEVENLABS_VOICE_GUILLAUME
+            )
+            audio, cached = await tts.synthesize(script, voice_id)
+            await cl.Audio(
+                content=audio, mime="audio/mpeg", auto_play=True, display="inline"
+            ).send()
+            fallback.record_success()
+        except tts.ElevenLabsError as exc:
+            fallback.record_failure()
+            await cl.Message(
+                content=f"🔇 Brief vocal indisponible : {type(exc).__name__}",
+                author="Voice",
+            ).send()
 ```
 
 ### Tests à produire
@@ -513,6 +572,9 @@ async def test_cache_hit_second_call():
 
 ### Check-list spécifique
 
+- [ ] **Aucune redéfinition** de `@cl.on_chat_start` : S10 a étendu la
+      fonction créée par S06 (grep que `on_chat_start` n'apparaît
+      qu'une seule fois dans `app.py`).
 - [ ] Le briefer ne voit **que** la sortie déjà validée par S05 (pas de
       tool calls bruts).
 - [ ] Le script généré ne contient jamais de SIREN (test unitaire vert).

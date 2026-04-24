@@ -39,11 +39,20 @@ Sources de vérité :
 - `src/genial_agent/guardrails/input_gate.py` : length cap, injection
   regex, wrapping (wrapping déjà en S03 mais centralisé ici).
 - `src/genial_agent/guardrails/output_validator.py` : Pydantic schemas,
-  SIREN consistency check, no advisory language.
+  SIREN consistency check, check horodatage bilan, no advisory language.
 - `src/genial_agent/guardrails/critic.py` : Haiku-critic async.
 - `src/genial_agent/guardrails/pii.py` : scrubbing pour logs.
 - `src/genial_agent/guardrails/caps.py` : centraliser les constantes de
   cap (déjà partiellement en S04).
+- `src/genial_agent/guardrails/token_budget.py` : tracker tokens par
+  session (cahier §14.3 C4) + event `capped` quand dépassement.
+- **Politique de traitement d'un SIREN orphelin détecté** (cahier R11 :
+  *« retry ou dégradation »*) — retourner un event `hallucination_detected`
+  consommable par l'agent pour (a) re-demander au modèle de sourcer ou
+  (b) afficher un disclaimer visible dans la réponse finale.
+- **Check horodatage bilan** : toute séquence `\d+[ .,]?\d*\s?(€|Md€|M€|k€)`
+  ou similaire doit être suivie d'un segment `bilan .* \d{4}` dans un
+  rayon de 200 caractères, sinon flag `missing_bilan_date`.
 
 ### Hors scope
 
@@ -95,7 +104,8 @@ src/genial_agent/guardrails/
 ├── output_validator.py
 ├── critic.py
 ├── pii.py
-└── caps.py
+├── caps.py
+└── token_budget.py
 ```
 
 ### `input_gate.py`
@@ -171,13 +181,33 @@ class OutputValidationResult(BaseModel):
     issues: list[str] = Field(default_factory=list)
     sirens_in_text: list[str] = Field(default_factory=list)
     sirens_in_tool_results: list[str] = Field(default_factory=list)
+    orphan_sirens: list[str] = Field(default_factory=list)
+
+
+# Détection d'un chiffre financier (CA, résultat, effectif...) non
+# horodaté : on cherche un montant en € ou un « CA » puis on vérifie
+# qu'une mention « bilan ... YYYY » ou « clos ... YYYY » existe dans
+# les 200 caractères qui suivent.
+MONEY_RE = re.compile(
+    r"\b(?:\d[\d\s]*\s?(?:€|md€|m€|k€)|(?:CA|chiffre d['’]affaires|résultat net)\s*[:=]?\s*\d)",
+    re.IGNORECASE,
+)
+BILAN_CONTEXT_RE = re.compile(r"bilan[^.]{0,40}\d{4}|clos[^.]{0,40}\d{4}", re.IGNORECASE)
+
+
+def _has_orphan_money_without_bilan(text: str) -> bool:
+    for m in MONEY_RE.finditer(text):
+        window = text[m.start(): m.start() + 200]
+        if not BILAN_CONTEXT_RE.search(window):
+            return True
+    return False
 
 
 def validate_response(
     text: str,
     allowed_sirens: set[str],
 ) -> OutputValidationResult:
-    """Vérifie que les SIREN cités sont dans les résultats MCP, pas d'advisory, etc."""
+    """Vérifie SIREN cités ∈ tool results, horodatage bilan, pas d'advisory."""
     sirens_in_text = set(SIREN_RE.findall(text))
     issues: list[str] = []
 
@@ -189,12 +219,49 @@ def validate_response(
         if pattern.search(text):
             issues.append(f"advisory_language:{pattern.pattern[:30]}")
 
+    if _has_orphan_money_without_bilan(text):
+        issues.append("missing_bilan_date")
+
     return OutputValidationResult(
         valid=(len(issues) == 0),
         issues=issues,
         sirens_in_text=sorted(sirens_in_text),
         sirens_in_tool_results=sorted(allowed_sirens),
+        orphan_sirens=sorted(orphan_sirens),
     )
+
+
+# Politique R11 (cahier) : quand `validate_response` remonte des
+# orphan_sirens, l'agent doit dégrader. Stratégie retenue :
+# 1. Si issues uniquement `missing_bilan_date` → disclaimer sous la
+#    réponse : « ⚠ dates de bilan manquantes, vérifier directement sur
+#    Pappers ».
+# 2. Si `orphan_sirens` non vide → disclaimer visible :
+#    « ⚠ SIREN cités non vérifiés : {...}. Ne pas utiliser sans contrôle. »
+#    ET log WARNING structuré pour déclencher un retry côté agent
+#    (au max 1 relance automatique en repassant la réponse au LLM avec
+#    un message « sourcer les SIREN suivants ou les retirer »).
+# 3. Si `advisory_language` → reframing automatique : retirer les
+#    phrases matchées, préfixer par « D'après les bilans Pappers : ».
+def degrade(result: OutputValidationResult, text: str) -> tuple[str, bool]:
+    """Applique la dégradation. Retourne (text_dégradé, needs_llm_retry)."""
+    needs_retry = bool(result.orphan_sirens)
+    disclaimers: list[str] = []
+    if result.orphan_sirens:
+        disclaimers.append(
+            f"⚠ SIREN cités non retrouvés dans les sources Pappers : "
+            f"{', '.join(result.orphan_sirens)}. À vérifier."
+        )
+    if "missing_bilan_date" in result.issues:
+        disclaimers.append(
+            "⚠ Certains chiffres ne sont pas horodatés (date de bilan manquante)."
+        )
+    if any(i.startswith("advisory_language") for i in result.issues):
+        for p in ADVISORY_PATTERNS:
+            text = p.sub("[reformulation neutre]", text)
+    if disclaimers:
+        text = text + "\n\n" + "\n".join(disclaimers)
+    return text, needs_retry
 ```
 
 ### `critic.py`
@@ -318,6 +385,53 @@ MAX_BRIEFS_PER_SESSION = 20
 DAILY_PAPPERS_CREDITS_CAP = 100
 ```
 
+### `token_budget.py`
+
+```python
+"""Tracker de tokens consommés par session (cahier §14.3 C4)."""
+from __future__ import annotations
+
+import asyncio
+from collections import defaultdict
+
+from genial_agent.guardrails.caps import MAX_TOKENS_PER_SESSION
+
+
+class TokenBudget:
+    def __init__(self, cap: int = MAX_TOKENS_PER_SESSION) -> None:
+        self._cap = cap
+        self._used: dict[str, int] = defaultdict(int)
+        self._lock = asyncio.Lock()
+
+    async def add(self, session_id: str, input_tokens: int, output_tokens: int) -> None:
+        async with self._lock:
+            self._used[session_id] += input_tokens + output_tokens
+
+    async def used(self, session_id: str) -> int:
+        async with self._lock:
+            return self._used[session_id]
+
+    async def remaining(self, session_id: str) -> int:
+        async with self._lock:
+            return max(0, self._cap - self._used[session_id])
+
+    async def exhausted(self, session_id: str) -> bool:
+        async with self._lock:
+            return self._used[session_id] >= self._cap
+
+    async def reset(self, session_id: str) -> None:
+        async with self._lock:
+            self._used.pop(session_id, None)
+
+
+budget = TokenBudget()
+```
+
+Usage attendu — le call-site `run_turn` (S03) / `run_routed_turn` (S04)
+appelle `budget.add(session_id, input_tokens, output_tokens)` après chaque
+réponse LLM. Avant chaque turn, vérifier `await budget.exhausted(...)` et
+yield un event `capped` si True.
+
 ### Tests à produire
 
 #### Unitaires
@@ -382,6 +496,42 @@ class TestOutputValidator:
         result = validate_response(text, allowed_sirens=set())
         assert any("advisory" in i for i in result.issues)
 
+    def test_money_without_bilan_flagged(self):
+        text = "LVMH a réalisé un CA de 94 Md€. Sa croissance est solide."
+        result = validate_response(text, allowed_sirens=set())
+        assert "missing_bilan_date" in result.issues
+
+    def test_money_with_bilan_ok(self):
+        text = "LVMH a réalisé un CA de 94 Md€ (bilan clos 31/12/2023)."
+        result = validate_response(text, allowed_sirens=set())
+        assert "missing_bilan_date" not in result.issues
+
+    def test_degrade_adds_disclaimer_on_orphan(self):
+        from genial_agent.guardrails.output_validator import degrade, validate_response
+        text = "LVMH SIREN 999999999 CA 94 Md€ (bilan clos 31/12/2023)."
+        result = validate_response(text, allowed_sirens={"775670417"})
+        degraded, retry = degrade(result, text)
+        assert retry is True
+        assert "999999999" in degraded and "À vérifier" in degraded
+
+
+class TestTokenBudget:
+    async def test_budget_tracks_and_caps(self):
+        from genial_agent.guardrails.token_budget import TokenBudget
+        b = TokenBudget(cap=100)
+        await b.add("sess1", 40, 30)
+        assert await b.exhausted("sess1") is False
+        await b.add("sess1", 40, 0)
+        assert await b.exhausted("sess1") is True
+        assert await b.remaining("sess1") == 0
+
+    async def test_budget_isolated_per_session(self):
+        from genial_agent.guardrails.token_budget import TokenBudget
+        b = TokenBudget(cap=100)
+        await b.add("a", 50, 50)
+        assert await b.exhausted("a") is True
+        assert await b.exhausted("b") is False
+
 
 class TestPII:
     def test_email_scrubbed(self):
@@ -439,10 +589,17 @@ async def test_critic_on_advisory_response():
 - [ ] `input_gate` lève bien sur les 5 injections de test du §15 du
       cahier des charges.
 - [ ] `output_validator` détecte bien les SIREN orphelins (tests param).
+- [ ] `output_validator` détecte un chiffre financier non horodaté.
+- [ ] `degrade()` produit un texte avec disclaimer ET remonte
+      `needs_llm_retry=True` sur orphan SIREN.
+- [ ] `token_budget.TokenBudget` est consommé par `run_turn` /
+      `run_routed_turn` (vérifier l'import dans S03/S04).
 - [ ] `critic.py` ne bloque pas le flux principal (appel async séparé).
 - [ ] `pii.py` couvre email, téléphone FR, IBAN — tests unitaires verts.
 - [ ] `caps.py` est importé partout où nécessaire — pas de constantes
-      dupliquées dans S04 ou ailleurs.
+      dupliquées dans S04 ou ailleurs (vérifier que `S04/routing.py`
+      importe `MAX_TOOL_CALLS_PER_TURN` et `WALL_CLOCK_S` depuis
+      `caps.py`).
 - [ ] Aucun print/log qui contienne un texte non scrubbé.
 
 ### Commit phase 3
@@ -453,10 +610,14 @@ async def test_critic_on_advisory_response():
 
 ## ✅ Critères d'acceptation
 
-- [ ] Tous les tests unitaires guardrails passent.
+- [ ] Tous les tests unitaires guardrails passent (input gate, output
+      validator avec dates, token budget, PII).
 - [ ] Tests critic intégration passent (avec clé).
+- [ ] `degrade()` est appelé automatiquement en fin de turn par le
+      pipeline principal (S03 ou S04 intégré).
 - [ ] Le pack adversarial du §15 cahier des charges passe en simulé
-      (test runner qui appelle `check_input` sur les prompts T1, T4, T8).
+      (test runner qui appelle `check_input` sur les prompts T1, T4, T8
+      ; les autres sont testés end-to-end en S09).
 - [ ] `gitleaks` clean.
 
 ---

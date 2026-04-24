@@ -23,13 +23,18 @@ Sources de vérité :
 ## 🔒 Prérequis
 
 - [ ] S01 et S02 terminées et approuvées.
-- [ ] `ANTHROPIC_API_KEY` dans `.env`.
-- [ ] `PAPPERS_API_KEY` dans `.env`.
+- [x] `ANTHROPIC_API_KEY` dans `.env` (validée).
+- [x] `PAPPERS_API_KEY` dans `.env` (validée).
 
 ## 🔑 Inputs utilisateur requis
 
-- [ ] Clé Anthropic active avec accès aux modèles `claude-haiku-4-5` et
-      `claude-sonnet-4-6`.
+- [x] Clé Anthropic active avec accès confirmé aux modèles :
+      - `claude-sonnet-4-6` — `inference_geo=global`, OK.
+      - `claude-haiku-4-5` — résolu côté API vers
+        `claude-haiku-4-5-20251001`, OK.
+      - Probe effectué le 2026-04-24 (réponses `"OK"` sur les deux).
+- [x] Un crédit initial est actif sur le compte Anthropic (sinon le
+      probe aurait retourné 401/402).
 
 ---
 
@@ -148,7 +153,10 @@ mentionnée dans la conversation. Si ambiguë, demande clarification.
 """Constantes de modèles et types."""
 from enum import Enum
 
-# À vérifier/pinner en phase 1
+# Pinnés via probe API du 2026-04-24 :
+# - claude-sonnet-4-6 : alias courant, inference_geo=global
+# - claude-haiku-4-5  : l'API résout vers claude-haiku-4-5-20251001
+#   → on pin directement le snapshot daté pour reproductibilité
 MODEL_HAIKU = "claude-haiku-4-5-20251001"
 MODEL_SONNET = "claude-sonnet-4-6"
 
@@ -200,20 +208,36 @@ async def run_turn(
     state: ConversationState,
     user_message: str,
     tier: ModelTier = ModelTier.HAIKU,
+    extra_tools: list[dict[str, Any]] | None = None,
+    continuation: bool = False,
 ) -> AsyncIterator[dict[str, Any]]:
     """Exécute un tour agent et yield les événements (text, tool_call, tool_result).
 
     Phase 2 : implémentation complète en s'appuyant sur S02 pour les
     appels MCP réels. Le format des yields sera consommé par l'UI en S06.
+
+    `extra_tools` permet à S04 d'injecter `escalate_to_sonnet`.
+    `continuation=True` : ne pas ré-append un user message (utilisé
+    après escalade pour que Sonnet reprenne le state intact).
     """
-    state.messages.append({"role": "user", "content": wrap_user_input(user_message)})
+    if not continuation:
+        state.messages.append({"role": "user", "content": wrap_user_input(user_message)})
+
+    # Discovery + mapping S02 → tools Anthropic
+    pappers_tools = await mcp_pappers.list_available_tools()
+    tools_schema = mcp_pappers.to_anthropic_schema(pappers_tools)
+    if extra_tools:
+        tools_schema = tools_schema + extra_tools
+
     client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
     # Boucle tool calling :
-    # 1. Appel messages.stream() avec tools = schémas Pappers + schémas locaux
-    # 2. Si le model répond tool_use → exécuter le tool (MCP Pappers via S02)
+    # 1. Appel messages.stream() avec tools = tools_schema
+    # 2. Si le model répond tool_use → mcp_pappers.call_tool(name, args)
+    #    (cache 24 h + retry tenacity gérés par S02)
     # 3. Append tool_result au state.messages
     # 4. Reboucler jusqu'à stop_reason=end_turn
-    # 5. Yield les events au consommateur (text chunks, tool calls, tool results)
+    # 5. Yield les events (text, tool_use, tool_result, llm_meta avec
+    #    request_id/tokens pour S07 stats)
     raise NotImplementedError
 ```
 
@@ -226,8 +250,20 @@ async def run_turn(
 
 - Toujours `wrap_user_input()` avant d'ajouter au `state.messages` — y
   compris sur les messages de follow-up.
-- Les tool schemas à passer au modèle Claude doivent matcher ce que le
-  MCP Pappers expose (conversion `PappersTool` → `anthropic` tool shape).
+- **Conversion des schémas tools** : utiliser
+  `mcp_pappers.to_anthropic_schema(tools)` (défini en S02) pour
+  convertir la liste de `PappersTool` retournée par le discovery en
+  payload `tools=` attendu par `anthropic.messages.create`. Ne pas
+  dupliquer la logique ici.
+- **Exécution tool call** : quand Claude renvoie un `tool_use`, router
+  vers `mcp_pappers.call_tool(name, args)` (qui gère cache 24 h + retry
+  tenacity, S02), puis ajouter un message `role=user` avec un bloc
+  `tool_result` référencant le `tool_use_id` du modèle.
+- **`tool_choice` forcé sur la première turn** (cahier R9) : passer
+  `tool_choice={"type": "auto"}` par défaut ; si on détecte que la
+  requête mentionne explicitement une entreprise FR, basculer sur
+  `tool_choice={"type": "any"}` pour forcer un tool call à la 1re
+  itération. À décider en phase 1.
 - Ne pas oublier de rajouter le `tool_result` dans l'historique après
   chaque appel, sinon le modèle ne voit pas la réponse.
 - `stop_reason` à observer : `end_turn`, `tool_use`, `max_tokens`,
@@ -323,6 +359,11 @@ async def test_multi_turn_pronoun_resolution():
 - [ ] Tests d'intégration skip proprement si clés absentes.
 - [ ] Modèles Claude : constantes utilisées partout, pas de string
       dupliquée.
+- [ ] Utilisation effective de `mcp_pappers.to_anthropic_schema` et
+      `mcp_pappers.call_tool` (pas de duplication de logique avec S02).
+- [ ] `run_turn` yield un event `llm_meta` par appel avec
+      `{"request_id": ..., "input_tokens": ..., "output_tokens": ...}`
+      (sera consommé par S07 pour `stats.incr`).
 
 ### Commit phase 3
 

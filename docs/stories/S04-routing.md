@@ -123,8 +123,16 @@ COMPLEX_PATTERNS: list[re.Pattern[str]] = [
 # Heuristique multi-SIREN : 2 SIREN détectés = complexe
 SIREN_RE = re.compile(r"\b\d{9}\b")
 
-MAX_TOOL_CALLS = 5
-WALL_CLOCK_S = 15
+# ⚠ Caps importés depuis guardrails/caps.py (S05). S04 est souvent
+# développée avant S05 ; dans ce cas, définir temporairement les
+# constantes ici ET faire un TODO explicite pour la migration en S05.
+# Une fois S05 mergée : `from genial_agent.guardrails.caps import
+# MAX_TOOL_CALLS_PER_TURN as MAX_TOOL_CALLS, WALL_CLOCK_S`.
+try:
+    from genial_agent.guardrails.caps import MAX_TOOL_CALLS_PER_TURN as MAX_TOOL_CALLS, WALL_CLOCK_S
+except ImportError:  # S05 pas encore mergée
+    MAX_TOOL_CALLS = 5
+    WALL_CLOCK_S = 15
 
 
 ESCALATE_TOOL_SCHEMA: dict[str, Any] = {

@@ -27,15 +27,22 @@ Sources de vérité :
 - [ ] Compte Railway créé (GitHub SSO OK).
 - [ ] Projet Railway créé et lié au repo `Bakajanai69/genial-agent`,
       région Amsterdam.
-- [ ] Variables d'env suivantes ajoutées dans Railway Project Variables :
-  - `ANTHROPIC_API_KEY`
-  - `PAPPERS_API_KEY`
-  - `ELEVENLABS_API_KEY` (si S10 prévue)
+- [ ] Variables d'env à **recopier** dans Railway Project Variables
+      depuis le `.env` local (déjà validées en local avant S08, cf.
+      `docs/stories/README.md` → check-list) :
+  - `ANTHROPIC_API_KEY` (testée OK sur Haiku 4.5 + Sonnet 4.6).
+  - `PAPPERS_API_KEY` (handshake MCP OK, 31 tools exposés).
+  - `ELEVENLABS_API_KEY` (tier `growing_business`, quota large).
   - `ELEVENLABS_VOICE_GAELLE`, `ELEVENLABS_VOICE_GUILLAUME`,
-    `ELEVENLABS_MODEL_ID`
-  - `ENABLE_VOICE_BRIEF=false` (sera `true` après S10)
-  - `LOG_LEVEL=INFO`
+    `ELEVENLABS_MODEL_ID` (constantes publiques).
+  - `ENABLE_VOICE_BRIEF=false` (à flipper `true` **après** merge S10 +
+    gating §19.1 vert).
+  - `LOG_LEVEL=INFO`.
 - [ ] Compte UptimeRobot créé (plan free).
+
+> ⚠️ **Ne jamais coller les clés dans un canal Railway public** (issue,
+> PR, log). Les ajouter uniquement via le panel Variables (masquées par
+> défaut).
 
 ---
 
