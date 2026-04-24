@@ -54,17 +54,24 @@ Sources de vérité :
   - Cap de **tool calls par tour** = 5 (conforme cahier §5.3 et
     §14.3 C4 ; cf. README "Décisions de cohérence"). Déclenche
     l'escalade forcée mid-stream.
+  - Cap **wall-clock par tour** = 15 s (conforme cahier §5.3). Déclenche
+    aussi l'escalade forcée en Haiku, ou l'event `capped` en Sonnet.
+    Implémenté via `asyncio.wait_for(gen.__anext__(), timeout=remaining)`
+    pour respecter PEP 789 (voir phase 1).
   - Metadata routing (événements `escalation` + `routing_done`) pour
     alimenter le badge UI (S06) et les stats (S07).
 
 ### Hors scope explicite
 
-- **Wall-clock cap** : pas implémenté en S04 (voir §"PEP 789" dans la
-  phase 1). `MCP_CALL_BUDGET=20 s` (S02) + `SDK Anthropic` retries
-  internes + `MAX_ITERATIONS=12` (S03) couvrent déjà les runaways. Un
-  wall-clock global de turn peut être ajouté en S05 via un pattern
-  compatible PEP 789 (observé via `asyncio.wait_for` sur `__anext__`,
-  pas `asyncio.timeout` autour d'un yield).
+- **Wall-clock sur des awaits internes à `run_turn`** : S04 ne peut
+  interrompre qu'**entre** deux events yieldés (granularité `__anext__`).
+  Un await lent à l'intérieur d'une itération S03 (ex : MCP tool call
+  qui dure) n'est pas cappé par S04. Les budgets downstream existants
+  absorbent ce cas : `CALL_TOOL_BUDGET_S=20 s` dans `mcp_pappers.call_tool`
+  (S02), retries SDK Anthropic (2 internes), `MAX_ITERATIONS=12` dans
+  `agent.run_turn` (S03). Donc le cap S04 est **soft** (effectif à la
+  prochaine frontière d'event), ce qui est cohérent avec le fait que
+  cahier §5.3 décrit un trigger d'**escalade**, pas un kill brutal.
 - **UI Chainlit consommant ces metadata** : S06.
 - **Observabilité détaillée** (incrément stats) : S07 (call-site
   `routing.py`, incrémente `stats.routing_decision(tier, escalated)`).
@@ -93,7 +100,7 @@ Recherches effectuées via :
   accent-insensible (`évolution` ≠ `evolution`) → on normalise l'entrée
   via `unicodedata.NFKD` avant match.
 
-#### 🧨 Décision majeure : pas de `asyncio.timeout` dans la boucle
+#### 🧨 Décision majeure : pas de `asyncio.timeout` — `wait_for` sur `__anext__`
 
 Le squelette initial wrappait la boucle S04 dans
 `async with asyncio.timeout(WALL_CLOCK_S)`. C'est **l'antipattern PEP
@@ -101,16 +108,50 @@ Le squelette initial wrappait la boucle S04 dans
 scope (`timeout`, `TaskGroup`) peut annuler la mauvaise tâche, laisser
 passer des exceptions mal typées, ou casser le cleanup du generator.
 
-Conséquences :
+**Pattern retenu** — itération manuelle avec `asyncio.wait_for` autour
+de chaque `__anext__()`, la valeur yieldée n'est **plus** dans un
+cancel scope. On respecte PEP 789 tout en gardant le cap wall-clock
+prévu par le cahier §5.3.
 
-- S04 **n'implémente pas** de wall-clock cap global en MVP.
-- Les caps existants suffisent en pratique : `CALL_TOOL_BUDGET_S=20 s`
-  dans `mcp_pappers.call_tool`, retries SDK Anthropic (2 internes),
-  `MAX_ITERATIONS=12` dans `agent.run_turn`.
-- Si un wall-clock total s'avère nécessaire en démo (S05), le pattern
-  compatible est `asyncio.wait_for(gen.__anext__(), timeout=remaining)`
-  dans le consumer — **pas** `asyncio.timeout` dans l'async generator
-  S04.
+```python
+gen = run_turn(state, user_message, tier=initial_tier, extra_tools=...)
+deadline = time.monotonic() + WALL_CLOCK_S
+aiter = gen.__aiter__()
+try:
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            # Cap wall-clock atteint → escalate ou capped (cf. §Cap)
+            break
+        try:
+            event = await asyncio.wait_for(aiter.__anext__(), timeout=remaining)
+        except StopAsyncIteration:
+            break
+        except TimeoutError:
+            # wait_for a timeout — un single await inside run_turn a dépassé
+            # `remaining`. On traite comme wall-clock cap hit.
+            break
+        # ... process event, yield, cap checks ...
+finally:
+    await gen.aclose()  # release state.lock de manière déterministe
+```
+
+Points importants :
+
+- **Granularité** : `wait_for` timeout uniquement sur `__anext__()`, soit
+  « temps entre deux events yieldés par S03 ». Un await interne long
+  (ex : MCP call de 25 s) peut dépasser `remaining` — on detecte via
+  `TimeoutError`, on break, et le `aclose()` gère le cleanup.
+- **Cleanup du gen interrompu** : `gen.aclose()` fait tourner le
+  `async with state.lock` cleanup. Le `CancelledError` remonte dans
+  S03 au prochain `await`, ce qui casse la boucle S03 proprement.
+  L'invariant I2 (atomicité append) garantit que le state reste
+  cohérent même sur cancellation mid-iter.
+- **Pourquoi pas un `deadline` passé dans S03 directement ?** Rejeté :
+  ça changerait le contrat de `run_turn` (S03) qui est figé et approuvé,
+  pour une responsabilité (cap produit) qui est S04/S05.
+- **Overhead** : négligeable. `wait_for` wrap un awaitable existant,
+  pas de task extra créée côté consumer.
 
 Référence : [PEP 789 — Preventing task-cancellation bugs by limiting
 yield in async generators](https://peps.python.org/pep-0789/).
@@ -123,15 +164,29 @@ quand Haiku escalade vers Sonnet. Si on nestait les appels, le 2e
 `async with state.lock` deadlockerait (asyncio.Lock n'est pas
 reentrant).
 
-**Pattern retenu — break + aclose + second run_turn séquentiel** :
+**Pattern retenu — break + aclose + second run_turn séquentiel** (le
+pattern s'intègre dans la boucle `wait_for` décrite juste au-dessus) :
 
 ```python
 gen = run_turn(state, user_message, tier=Haiku, extra_tools=[ESCALATE_TOOL_SCHEMA])
+aiter = gen.__aiter__()
+deadline = time.monotonic() + WALL_CLOCK_S
 escalated = False
 escalation_reason: str | None = None
 
 try:
-    async for event in gen:
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            # Wall-clock hit (cf. §Décision majeure)
+            break
+        try:
+            event = await asyncio.wait_for(aiter.__anext__(), timeout=remaining)
+        except StopAsyncIteration:
+            break
+        except TimeoutError:
+            break
+
         if (
             event.get("type") == "tool_use"
             and event.get("name") == "escalate_to_sonnet"
@@ -185,29 +240,56 @@ pour maximiser l'efficacité, la description du tool `escalate_to_sonnet`
 instruit explicitement Haiku à l'appeler **seul** (pas en parallèle).
 Cf. `ESCALATE_TOOL_SCHEMA` plus bas.
 
-#### 🧮 Cap tool calls par-turn (vs cumulatif par state)
+#### 🧮 Caps par-turn (tool calls + wall-clock)
 
-`ConversationState.tool_calls_count` est **cumulatif par session**
-(docstring S03 explicite). Le cap §5.3 du cahier est **par-turn**. S04
-calcule un delta snapshot :
+**Tool calls** : `ConversationState.tool_calls_count` est **cumulatif
+par session** (docstring S03 explicite). Le cap §5.3 du cahier est
+**par-turn**. S04 calcule un delta snapshot :
 
 ```python
 initial_count = state.tool_calls_count
-async for event in gen:
-    yield event
-    per_turn = state.tool_calls_count - initial_count
-    if per_turn >= MAX_TOOL_CALLS_PER_TURN:
-        # Escalade forcée côté code : Haiku sur-estime, Sonnet reprend
-        escalation_reason = f"cap tool_calls_per_turn={per_turn}"
-        escalated = True
-        yield {"type": "escalation", "reason": escalation_reason, "mode": "forced"}
-        break
+# ... dans la boucle :
+per_turn = state.tool_calls_count - initial_count
+if per_turn >= MAX_TOOL_CALLS_PER_TURN:
+    escalation_reason = f"cap_tool_calls_per_turn={per_turn}"
+    escalated = (initial_tier == ModelTier.HAIKU)
+    mode = "forced" if escalated else None
+    yield {"type": "escalation" if escalated else "capped", ...}
+    break
 ```
 
-Comportement symétrique au self-escalate : break → aclose → relance
-Sonnet en continuation. Si on est **déjà** en Sonnet (tier initial
-Sonnet sur keyword complexe), le cap émet un event `capped` et ne
-relance pas (pas de tier au-dessus).
+**Wall-clock** : `deadline = time.monotonic() + WALL_CLOCK_S` calculé
+une fois à l'entrée de `run_routed_turn`. Vérifié à chaque itération
+de la boucle `wait_for` (cf. §Décision majeure). Deux points de
+détection :
+
+1. `remaining <= 0` en haut de boucle → on break avant de démarrer un
+   nouveau `__anext__`.
+2. `asyncio.TimeoutError` levé par `wait_for` → un single await interne
+   a dépassé `remaining`.
+
+Les deux cas convergent vers le même handler :
+
+```python
+# Après la boucle, si on a break sans event d'exit normal :
+wall_clock_hit = time.monotonic() >= deadline
+if wall_clock_hit and not escalated:
+    escalation_reason = f"cap_wall_clock={WALL_CLOCK_S}s"
+    escalated = (initial_tier == ModelTier.HAIKU)
+    mode = "forced" if escalated else None
+    yield {"type": "escalation" if escalated else "capped", "reason": escalation_reason, "mode": mode}
+```
+
+**Comportement symétrique pour les deux caps** :
+
+| Tier initial | Cap hit | Event émis | Action |
+|---|---|---|---|
+| Haiku | tool_calls ou wall_clock | `escalation(mode=forced)` | Break, aclose, relance Sonnet en continuation |
+| Sonnet | tool_calls ou wall_clock | `capped` | Stop la boucle, pas de relance (pas de tier au-dessus pour MVP) |
+
+Note UX (cahier §5.3) : ces caps déclenchent une **escalade**, pas un
+kill brutal. En Sonnet déjà, `capped` signifie « la réponse s'arrête
+ici faute de budget, l'utilisateur voit ce que Sonnet a pu produire ».
 
 #### 🔤 Regex accent-insensible (normalisation `NFKD`)
 
@@ -301,9 +383,9 @@ S04 forwarde tous les events de `run_turn` **tels quels** + ajoute :
 | `type` | Champs | Émis quand |
 |---|---|---|
 | `routing_initial` | `tier: "haiku" \| "sonnet"`, `reason: "keyword" \| "default"` | Une fois, au tout début de `run_routed_turn`. |
-| `escalation` | `reason: str`, `mode: "self" \| "forced"` | Quand Haiku appelle `escalate_to_sonnet` (self) ou que le cap tool_calls par-turn est atteint (forced). |
-| `capped` | `reason: "tool_calls_per_turn"`, `count: int` | Quand le cap est atteint en tier Sonnet déjà (pas d'escalade possible). |
-| `routing_done` | `model_used: "haiku" \| "sonnet"`, `escalated: bool`, `tool_calls_count: int` | Une fois, en toute fin. |
+| `escalation` | `reason: str`, `mode: "self" \| "forced"` | Haiku appelle `escalate_to_sonnet` (self) ou cap `tool_calls_per_turn` / `wall_clock` atteint en Haiku (forced). `reason` inclut la cause exacte (`cap_tool_calls_per_turn=5`, `cap_wall_clock=15s`, ou texte libre pour self). |
+| `capped` | `reason: "tool_calls_per_turn" \| "wall_clock"`, `count: int \| None` | Cap atteint en tier Sonnet déjà (pas d'escalade possible, pas de tier au-dessus MVP). |
+| `routing_done` | `model_used: "haiku" \| "sonnet"`, `escalated: bool`, `escalation_mode: "self" \| "forced" \| None`, `escalation_reason: str \| None`, `tool_calls_count: int` | Une fois, en toute fin. |
 
 Les events S03 conservés (`text`, `tool_use`, `tool_result`, `llm_meta`,
 `end`) sont **forwardés**. S04 n'altère aucun d'eux.
@@ -319,8 +401,10 @@ Sonnet sur chaque itération si besoin d'un affichage plus fin.
 
 #### ✅ Points résolus
 
-- [x] **Caps** : uniquement `MAX_TOOL_CALLS_PER_TURN = 5` en S04 (wall-clock
-      déféré, voir §PEP 789 ci-dessus).
+- [x] **Caps** : `MAX_TOOL_CALLS_PER_TURN = 5` **et** `WALL_CLOCK_S = 15`
+      implémentés en S04 (cahier §5.3). Wall-clock via itération
+      manuelle + `asyncio.wait_for` sur `__anext__` pour respecter PEP
+      789.
 - [x] **Regex** : accent-normalisation via `unicodedata.NFKD` avant
       match ; patterns figés ci-dessus.
 - [x] **Multi-SIREN** : 2+ SIREN dans la query → Sonnet. Pattern
@@ -344,7 +428,7 @@ Sonnet sur chaque itération si besoin d'un affichage plus fin.
 
 ### Commit phase 1
 
-`story(S04): refine — PEP 789 drop asyncio.timeout, NFKD regex, lock reentrance via aclose, per-turn cap snapshot`
+`story(S04): refine — PEP 789 wait_for pattern, NFKD regex, lock reentrance via aclose, tool_calls + wall-clock caps in S04`
 
 ---
 
@@ -365,11 +449,9 @@ S03 expose déjà tous les hooks nécessaires (`extra_tools`,
 ### `routing.py` — squelette complet
 
 ```python
-"""Routing Haiku → Sonnet : pré-routeur keyword + escalate tool + cap.
+"""Routing Haiku → Sonnet : pré-routeur keyword + escalate tool + caps.
 
-Architecture Option B' (cahier §5.3) — défense en profondeur 2 couches
-en S04 (la 3e, wall-clock, est déférée à S05/post-MVP pour respecter
-PEP 789) :
+Architecture Option B' (cahier §5.3) — défense en profondeur 3 couches :
 
 1. **Pré-routeur keyword** (0 LLM, < 1 ms) — regex à frontière de mot
    sur texte normalisé NFKD-lowercase. Détecte comparaison, dossier
@@ -377,17 +459,23 @@ PEP 789) :
    entités, multi-SIREN. Dispatch direct Sonnet.
 2. **Auto-escalade Haiku** — tool `escalate_to_sonnet` injecté dans
    ``extra_tools``. Haiku décide lui-même quand il sature.
-3. *(3. Wall-clock : déféré S05, PEP 789)*.
+3. **Cap dur backend** — ``MAX_TOOL_CALLS_PER_TURN = 5`` et
+   ``WALL_CLOCK_S = 15`` (cahier §5.3, §14.3 C4). Mesurés en delta sur
+   ``state.tool_calls_count`` et ``time.monotonic()``. Si un cap est
+   atteint en tier Haiku, S04 force une escalade (mode ``forced``). En
+   tier Sonnet, S04 émet un event ``capped`` et arrête la boucle.
 
-En plus, cap dur **MAX_TOOL_CALLS_PER_TURN = 5** (cahier §5.3, §14.3 C4)
-mesuré en delta sur ``state.tool_calls_count``. Si le cap est atteint
-mid-stream en tier Haiku, S04 force une escalade (mode ``forced``). En
-tier Sonnet, S04 émet un event ``capped`` et s'arrête.
+Implémentation wall-clock : itération manuelle avec
+``asyncio.wait_for(gen.__anext__(), timeout=remaining)`` pour respecter
+PEP 789 (pas de ``asyncio.timeout`` autour d'un yield dans un async
+generator). Cf. phase 1 §"Décision majeure".
 """
 
 from __future__ import annotations
 
+import asyncio
 import re
+import time
 import unicodedata
 from collections.abc import AsyncIterator
 from typing import Any
@@ -403,14 +491,16 @@ logger = structlog.get_logger(__name__)
 # Caps S04 (à migrer vers guardrails/caps.py en S05)
 # ---------------------------------------------------------------------------
 
-# Cap par-turn (cahier §5.3, §14.3 C4, README "Décisions de cohérence").
+# Caps par-turn (cahier §5.3, §14.3 C4, README "Décisions de cohérence").
 # TODO(S05): déplacer vers guardrails/caps.py et importer d'ici.
 try:
     from genial_agent.guardrails.caps import (  # type: ignore[import-not-found]
         MAX_TOOL_CALLS_PER_TURN,
+        WALL_CLOCK_S,
     )
 except ImportError:  # S05 pas encore mergée
     MAX_TOOL_CALLS_PER_TURN = 5
+    WALL_CLOCK_S = 15
 
 
 # ---------------------------------------------------------------------------
@@ -515,17 +605,19 @@ async def run_routed_turn(
     1. ``pick_initial_tier`` → Haiku (défaut) ou Sonnet (keyword complexe).
     2. Lancer ``run_turn`` avec ce tier. Si Haiku, injecter le tool
        local ``escalate_to_sonnet`` via ``extra_tools``.
-    3. Forwarder les events S03 tels quels + émettre nos events routing.
-    4. Détecter escalade :
+    3. Itération manuelle ``wait_for(__anext__, timeout=remaining)`` pour
+       respecter le wall-clock cap sans tomber dans l'antipattern PEP 789.
+    4. Forwarder les events S03 tels quels + émettre nos events routing.
+    5. Détecter escalade :
        - **self** : event ``tool_use`` avec ``name == "escalate_to_sonnet"``.
-       - **forced** : ``state.tool_calls_count - initial_count >= MAX_TOOL_CALLS_PER_TURN``.
-    5. Sur escalade : break, ``gen.aclose()`` (release ``state.lock``),
+       - **forced (tool_calls)** : ``state.tool_calls_count - initial_count >= MAX_TOOL_CALLS_PER_TURN``.
+       - **forced (wall_clock)** : ``remaining <= 0`` en haut de boucle,
+         ou ``asyncio.TimeoutError`` levé par ``wait_for``.
+    6. Sur escalade : break, ``gen.aclose()`` (release ``state.lock``),
        relancer ``run_turn`` en tier Sonnet avec ``continuation=True``.
        L'invariant I2 de S03 garantit que ``state.messages`` est
        cohérent (pas d'orphan ``tool_use``).
-    6. Émettre ``routing_done`` en toute fin (après ``end`` de S03).
-
-    Pas de wall-clock cap en S04 (PEP 789 — cf. phase 1).
+    7. Émettre ``routing_done`` en toute fin (après ``end`` de S03).
     """
     initial_tier = pick_initial_tier(user_message)
     yield {
@@ -536,9 +628,24 @@ async def run_routed_turn(
     logger.info("routing_initial", tier=initial_tier.value)
 
     initial_count = state.tool_calls_count
+    deadline = time.monotonic() + WALL_CLOCK_S
     escalated = False
     escalation_reason: str | None = None
     escalation_mode: str | None = None
+    capped_in_sonnet = False  # set si cap atteint alors qu'on est déjà Sonnet
+
+    def _hit_cap_tool_calls() -> bool:
+        return (state.tool_calls_count - initial_count) >= MAX_TOOL_CALLS_PER_TURN
+
+    def _emit_cap_hit(
+        cap_reason: str,
+    ) -> dict[str, Any]:
+        """Fabrique l'event à émettre quand un cap est atteint, selon le
+        tier courant. Ne met PAS à jour les flags — c'est fait par
+        l'appelant."""
+        if initial_tier == ModelTier.HAIKU:
+            return {"type": "escalation", "reason": cap_reason, "mode": "forced"}
+        return {"type": "capped", "reason": cap_reason, "count": state.tool_calls_count - initial_count}
 
     # Haiku reçoit le tool escalate_to_sonnet en plus des Pappers.
     # Sonnet ne l'a pas (c'est déjà lui, rien à escalader).
@@ -550,11 +657,45 @@ async def run_routed_turn(
         tier=initial_tier,
         extra_tools=extra_tools,
     )
+    aiter = gen.__aiter__()
     try:
-        async for event in gen:
-            # Détecter self-escalade — break AVANT que run_turn exécute
-            # le "tool" escalate_to_sonnet via mcp_pappers (inconnu côté
-            # MCP, ça partirait en PappersError ou 404).
+        while True:
+            # --- Wall-clock cap (cahier §5.3) ---
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                cap_reason = f"cap_wall_clock={WALL_CLOCK_S}s"
+                logger.warning("routing_cap_wall_clock", seconds=WALL_CLOCK_S)
+                yield _emit_cap_hit(cap_reason)
+                if initial_tier == ModelTier.HAIKU:
+                    escalation_reason = cap_reason
+                    escalation_mode = "forced"
+                    escalated = True
+                else:
+                    capped_in_sonnet = True
+                break
+
+            # --- Next event, bounded par remaining ---
+            try:
+                event = await asyncio.wait_for(aiter.__anext__(), timeout=remaining)
+            except StopAsyncIteration:
+                break
+            except TimeoutError:
+                # Un single await dans run_turn a dépassé `remaining`.
+                # Même traitement que wall-clock cap hit.
+                cap_reason = f"cap_wall_clock={WALL_CLOCK_S}s"
+                logger.warning("routing_cap_wall_clock_wait_for", seconds=WALL_CLOCK_S)
+                yield _emit_cap_hit(cap_reason)
+                if initial_tier == ModelTier.HAIKU:
+                    escalation_reason = cap_reason
+                    escalation_mode = "forced"
+                    escalated = True
+                else:
+                    capped_in_sonnet = True
+                break
+
+            # --- Self-escalade : break AVANT que run_turn exécute le
+            # "tool" escalate_to_sonnet via mcp_pappers (MCP ne le
+            # connaît pas, ça partirait en PappersError / 404). ---
             if (
                 event.get("type") == "tool_use"
                 and event.get("name") == ESCALATE_TOOL_NAME
@@ -564,10 +705,7 @@ async def run_routed_turn(
                 )
                 escalation_mode = "self"
                 escalated = True
-                logger.info(
-                    "routing_escalate_self",
-                    reason=escalation_reason,
-                )
+                logger.info("routing_escalate_self", reason=escalation_reason)
                 yield {
                     "type": "escalation",
                     "reason": escalation_reason,
@@ -577,50 +715,36 @@ async def run_routed_turn(
 
             yield event
 
-            # Détecter cap tool calls par-turn (forced escalation).
-            per_turn = state.tool_calls_count - initial_count
-            if per_turn >= MAX_TOOL_CALLS_PER_TURN:
+            # --- Cap tool calls par-turn ---
+            if _hit_cap_tool_calls():
+                per_turn = state.tool_calls_count - initial_count
+                cap_reason = f"cap_tool_calls_per_turn={per_turn}"
+                logger.warning("routing_cap_tool_calls", per_turn_count=per_turn)
+                yield _emit_cap_hit(cap_reason)
                 if initial_tier == ModelTier.HAIKU:
-                    escalation_reason = (
-                        f"cap_tool_calls_per_turn={per_turn}"
-                    )
+                    escalation_reason = cap_reason
                     escalation_mode = "forced"
                     escalated = True
-                    logger.warning(
-                        "routing_escalate_forced",
-                        per_turn_count=per_turn,
-                    )
-                    yield {
-                        "type": "escalation",
-                        "reason": escalation_reason,
-                        "mode": "forced",
-                    }
-                    break
-                # Déjà Sonnet : on émet capped et on sort (pas de tier
-                # au-dessus pour MVP ; Opus serait un next step).
-                logger.warning(
-                    "routing_capped_on_sonnet",
-                    per_turn_count=per_turn,
-                )
-                yield {
-                    "type": "capped",
-                    "reason": "tool_calls_per_turn",
-                    "count": per_turn,
-                }
-                # On laisse la boucle continuer jusqu'au end_turn S03 :
-                # Sonnet peut encore conclure avec le contexte actuel.
-                # (Alternative : break. Choix retenu = laisser conclure,
-                # cap est "soft" côté Sonnet en S04.)
+                else:
+                    capped_in_sonnet = True
+                break
     finally:
         # Essentiel : libère state.lock en forçant le cleanup du
         # generator S03 (async with state.lock: fin de bloc). Sans
-        # aclose(), le lock peut rester détenu jusqu'au GC.
+        # aclose(), le lock peut rester détenu jusqu'au GC. aclose()
+        # est aussi ce qui propage CancelledError dans S03 si on a
+        # break après un wait_for timeout — S03 cleanup cohérent.
         await gen.aclose()
 
     if escalated:
         # L'invariant I2 de S03 garantit que state.messages est cohérent :
         # l'itération contenant l'escalade (ou sa détection) n'a pas été
         # appendée. Sonnet reprend sur un state propre avec continuation.
+        #
+        # Sonnet n'a PAS de wall-clock cap appliqué (pas de tier au-dessus
+        # pour escalader ; la démo peut tolérer une réponse Sonnet longue).
+        # Si besoin post-MVP : wrapper ce 2e async for dans la même
+        # logique wait_for + event capped, sans relance.
         async for event in run_turn(
             state,
             "",
@@ -638,19 +762,28 @@ async def run_routed_turn(
         "escalated": escalated,
         "escalation_mode": escalation_mode,
         "escalation_reason": escalation_reason,
+        "capped": capped_in_sonnet,
         "tool_calls_count": state.tool_calls_count - initial_count,
     }
 ```
 
 ### Gotchas documentés (à respecter impérativement)
 
-- **Pas de `asyncio.timeout`** autour d'un `yield` dans un async
-  generator (PEP 789). Pour un wall-clock cap, utiliser
-  `asyncio.wait_for(gen.__anext__(), timeout=...)` côté consumer
-  (voir S05 ou S06 post-MVP).
+- **Pas de `asyncio.timeout` autour du `async for`** (PEP 789 —
+  antipattern). Utiliser l'itération manuelle avec
+  `asyncio.wait_for(aiter.__anext__(), timeout=remaining)` — `wait_for`
+  wrap un single await, pas un yield.
+- **`asyncio.TimeoutError` ≠ hard error** : c'est le signal "single
+  await dépassait `remaining`". Traiter comme wall-clock cap hit
+  (même branche que `remaining <= 0` en haut de boucle).
+- **Pas de wall-clock sur le Sonnet de relance** : après escalade,
+  le 2e `run_turn` n'a pas de cap S04. Trade-off MVP assumé — on veut
+  que Sonnet puisse conclure proprement. Un cap post-escalation
+  serait un next step.
 - **`gen.aclose()` obligatoire** dans le `finally` — sans ça le
   `state.lock` peut rester détenu jusqu'au GC (non-CPython,
-  race conditions).
+  race conditions). Propage aussi `CancelledError` dans S03 pour
+  fermer la boucle mid-stream proprement en cas de wall-clock hit.
 - **Break avant le tool execute d'escalate** — le `yield {"type":
   "tool_use", "name": "escalate_to_sonnet"}` suspend S03 avant
   l'appel `mcp_pappers.call_tool(...)`. Si S04 ne breake pas,
@@ -1031,6 +1164,167 @@ async def test_capped_on_sonnet_no_further_escalation(
     assert not any(e["type"] == "escalation" for e in events)
 
 
+async def test_forced_escalation_on_wall_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wall-clock cap atteint en Haiku → escalade forcée vers Sonnet.
+
+    On force le budget à 0 s via monkeypatch pour que la première
+    itération de la boucle détecte ``remaining <= 0`` immédiatement.
+    Alternative plus réaliste (mais lente en CI) : faire traîner le
+    fake stream avec un ``asyncio.sleep``. Choix : monkeypatch simple,
+    0 ms wall-clock.
+    """
+    import genial_agent.routing as routing_mod
+
+    monkeypatch.setattr(routing_mod, "WALL_CLOCK_S", 0)
+
+    haiku_script = [
+        _ScriptedTurn(final=_message(stop_reason="end_turn", content=[_text("hi")]))
+    ]
+    sonnet_script = [
+        _ScriptedTurn(
+            final=_message(
+                stop_reason="end_turn",
+                content=[_text("Sonnet conclut.")],
+                model=MODEL_SONNET,
+            )
+        )
+    ]
+    _install_fake_anthropic(monkeypatch, haiku_script + sonnet_script)
+    _install_fake_mcp(monkeypatch)
+
+    state = ConversationState()
+    events = [ev async for ev in run_routed_turn(state, "x")]
+
+    escalation = next(e for e in events if e["type"] == "escalation")
+    assert escalation["mode"] == "forced"
+    assert "cap_wall_clock" in escalation["reason"]
+
+    routing_done = next(e for e in events if e["type"] == "routing_done")
+    assert routing_done["escalated"] is True
+    assert routing_done["escalation_mode"] == "forced"
+    assert routing_done["model_used"] == "sonnet"
+
+
+async def test_wall_clock_triggers_capped_on_sonnet(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tier initial Sonnet (via keyword) + wall-clock hit → event
+    ``capped``, pas d'escalation (pas de tier au-dessus pour MVP)."""
+    import genial_agent.routing as routing_mod
+
+    monkeypatch.setattr(routing_mod, "WALL_CLOCK_S", 0)
+
+    script = [
+        _ScriptedTurn(
+            final=_message(
+                stop_reason="end_turn",
+                content=[_text("start...")],
+                model=MODEL_SONNET,
+            )
+        )
+    ]
+    _install_fake_anthropic(monkeypatch, script)
+    _install_fake_mcp(monkeypatch)
+
+    state = ConversationState()
+    events = [ev async for ev in run_routed_turn(state, "Compare A et B")]
+
+    capped_events = [e for e in events if e["type"] == "capped"]
+    assert len(capped_events) == 1
+    assert "cap_wall_clock" in capped_events[0]["reason"]
+
+    # Pas d'escalation (déjà Sonnet)
+    assert not any(e["type"] == "escalation" for e in events)
+
+    routing_done = next(e for e in events if e["type"] == "routing_done")
+    assert routing_done["escalated"] is False
+    assert routing_done["capped"] is True
+
+
+async def test_wall_clock_wait_for_timeout_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Un fake stream qui bloque sur le 1er ``__anext__`` plus
+    longtemps que ``WALL_CLOCK_S`` doit faire lever
+    ``asyncio.TimeoutError`` côté wait_for, traité comme cap hit.
+
+    Ce test couvre le chemin ``except TimeoutError`` de la boucle — pas
+    atteignable par le monkeypatch ``WALL_CLOCK_S=0`` qui hit via
+    ``remaining <= 0`` en haut de boucle.
+    """
+    import genial_agent.routing as routing_mod
+
+    # Budget court mais > 0 pour forcer wait_for à réellement attendre.
+    monkeypatch.setattr(routing_mod, "WALL_CLOCK_S", 0.05)
+
+    class _SlowStream:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+        @property
+        def text_stream(self):
+            return self._iter()
+
+        async def _iter(self):
+            await asyncio.sleep(1.0)  # >> 0.05 s
+            yield "never"
+
+        async def get_final_message(self):
+            return _message(stop_reason="end_turn", content=[_text("never")])
+
+        @property
+        def request_id(self):
+            return "slow"
+
+    class _SlowMessages:
+        def __init__(self):
+            self.calls = []
+
+        def stream(self, **kwargs):
+            self.calls.append(kwargs)
+            return _SlowStream()
+
+    class _SlowClient:
+        def __init__(self):
+            self.messages = _SlowMessages()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+    fake = _SlowClient()
+    monkeypatch.setattr(
+        "genial_agent.agent.AsyncAnthropic", lambda **_kw: fake
+    )
+    _install_fake_mcp(monkeypatch)
+
+    # Relance Sonnet après escalation (2e client) — on stub simple.
+    # Test focalisé : vérifier que le TimeoutError path émet
+    # bien l'event cap.
+    state = ConversationState()
+    events: list[dict[str, Any]] = []
+    # On consomme jusqu'au 1er event escalation/capped puis on arrête
+    # la démo (éviter le 2e run_turn qui dépendrait du fake).
+    try:
+        async for ev in run_routed_turn(state, "x"):
+            events.append(ev)
+            if ev["type"] in {"escalation", "capped"}:
+                break
+    except Exception:
+        pass
+
+    tagged = [e for e in events if e["type"] in {"escalation", "capped"}]
+    assert tagged, "aucun event cap émis malgré wait_for timeout"
+    assert "cap_wall_clock" in tagged[0]["reason"]
+
+
 async def test_routing_initial_and_done_always_emitted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1170,7 +1464,7 @@ make test-integration
 
 ### Commit phase 2
 
-`feat(S04): keyword router, escalate_to_sonnet tool, forced-cap escalation, per-turn delta`
+`feat(S04): keyword router, escalate_to_sonnet tool, tool_calls + wall-clock caps via wait_for`
 
 puis, si tests passent :
 
@@ -1183,15 +1477,19 @@ puis, si tests passent :
 ### Check-list spécifique
 
 - [ ] **PEP 789 respecté** : aucun `asyncio.timeout` / `asyncio.TaskGroup`
-      autour d'un `yield` dans `run_routed_turn`. Si wall-clock cap
-      ajouté, il doit être côté consumer via `wait_for(__anext__)`.
+      autour d'un `yield` dans `run_routed_turn`. Wall-clock implémenté
+      via itération manuelle + `asyncio.wait_for(aiter.__anext__(),
+      timeout=remaining)`.
+- [ ] **`TimeoutError` de `wait_for` traité comme cap hit** (même
+      branche que `remaining <= 0`), pas comme erreur fatale.
 - [ ] **`gen.aclose()` présent dans un `finally`** — libère
       `state.lock` de manière déterministe.
 - [ ] **Break avant exécution du tool escalate** — vérifier qu'aucun
       test ne voit `mcp_pappers.call_tool` appelé avec
       `"escalate_to_sonnet"`.
-- [ ] **Cap en delta** — `state.tool_calls_count - initial_count`, pas
-      en absolu.
+- [ ] **Caps en delta** — `state.tool_calls_count - initial_count`,
+      pas en absolu ; `deadline = time.monotonic() + WALL_CLOCK_S`
+      posé une seule fois à l'entrée.
 - [ ] **Normalisation NFKD avant regex** — tests accent/majuscules
       passent.
 - [ ] **Patterns sans faux positifs** — `comparable` ne matche pas
@@ -1230,8 +1528,17 @@ puis, si tests passent :
       passe — pas d'appel `mcp_pappers.call_tool` sur
       `escalate_to_sonnet`.
 - [ ] Test `test_forced_escalation_on_tool_cap` (unit fake) passe.
+- [ ] Test `test_forced_escalation_on_wall_clock` (unit fake) passe :
+      `WALL_CLOCK_S=0` monkeypatch, escalation `mode=forced`,
+      `reason` contient `cap_wall_clock`.
 - [ ] Test `test_capped_on_sonnet_no_further_escalation` (unit fake)
       passe : event `capped` émis, pas d'escalation.
+- [ ] Test `test_wall_clock_triggers_capped_on_sonnet` (unit fake)
+      passe : Sonnet initial + wall-clock hit → `capped`, pas
+      d'escalation, `routing_done.capped=True`.
+- [ ] Test `test_wall_clock_wait_for_timeout_path` (unit) passe :
+      couvre le chemin `except TimeoutError` (fake stream qui bloque
+      plus que `WALL_CLOCK_S`).
 - [ ] Test `test_state_lock_released_after_self_escalate` (unit)
       passe — pas de deadlock.
 - [ ] Tests live `test_simple_stays_haiku_live` et
