@@ -866,3 +866,109 @@ principal) :
 - L14 : scénario 7 ajouté au Loom.
 - L15 : entrée dédiée dans `EVALUATION.md` ("active le brief vocal et
   écoute Gaëlle te briefer sur LVMH").
+
+### 19.12 Robustesse intégration ElevenLabs
+
+Même niveau d'exigence que Pappers et Claude — pas de différence entre
+une API "critique" et une API "bonus". Si on intègre, on intègre
+proprement.
+
+#### 19.12.1 Idempotence applicative
+
+ElevenLabs **ne propose pas** de header `Idempotency-Key` natif
+(contrairement à Stripe). On implémente côté client :
+
+- Clé de cache : `sha256(script_text + voice_id + model_id)`.
+- TTL : 60 s — couvre double-submit, retry navigateur, refresh, spam
+  clic sur "réactive le brief".
+- Un même `(texte, voix)` ne paie qu'une fois dans la fenêtre.
+- En bonus : un brief identique déjà dans le cache **bypasse même
+  l'appel réseau** → latence 0, crédits 0.
+
+#### 19.12.2 Streaming
+
+Endpoint retenu : `POST /v1/text-to-speech/{voice_id}/stream` avec
+`output_format=mp3_22050_32` (bon compromis qualité / taille / support
+navigateur).
+
+Deux modes possibles :
+
+| Mode | Description | Choix MVP |
+|---|---|---|
+| **Buffer puis play** | On télécharge tout le MP3 (~500 Ko pour 40 s), puis `cl.Audio` le joue | ✅ **Retenu** : simple, robuste, délai 1–2 s acceptable |
+| **Pipe chunks en live** | Proxy qui streame les chunks ElevenLabs vers le navigateur | ❌ Ajoute complexité pour gain marginal sur 40 s d'audio |
+
+Si besoin d'améliorer : basculer en chunk streaming via une route
+FastAPI dédiée (stretch dans le stretch, à documenter seulement).
+
+#### 19.12.3 Retry et backoff
+
+Politique explicite :
+
+- **3 tentatives maximum** sur erreurs transitoires.
+- **Backoff exponentiel** : 0.5 s → 1 s → 2 s.
+- **Pas de retry** sur 4xx logiques (401, 402, 422) — échec immédiat.
+- **Jitter** ±20 % pour éviter les tempêtes de retry synchronisées.
+- Implémentation via `tenacity` (stop after N attempts, wait
+  exponential, retry_if_exception_type).
+
+#### 19.12.4 Mapping des codes erreur
+
+| Code HTTP | Cause | Action agent |
+|---|---|---|
+| 200 | OK | Stream / return bytes |
+| 401 | Clé invalide / révoquée | Log critique, **désactivation immédiate** du toggle pour la session, message utilisateur "mode vocal indisponible" |
+| 402 | Quota crédits épuisé | **Désactivation immédiate** du toggle, bandeau UI "crédits ElevenLabs épuisés, contacte l'admin", pas de retry |
+| 422 | Payload invalide (texte > limite, voice_id inconnu) | Log, tentative de troncation à 500 chars, retry une fois ; si échec persistant, fallback silencieux |
+| 429 | Rate limit | Backoff retry (§19.12.3) |
+| 500 / 502 / 503 / 504 | Erreur serveur | Backoff retry (§19.12.3) |
+| Timeout (> 30 s) | Latence anormale | Abort, message "brief vocal expiré, réessaie" |
+
+Toutes les erreurs sont loggées en structured log avec : `request_id`,
+`voice_id`, `text_length`, `http_status`, `latency_ms`, `retry_count`.
+
+#### 19.12.5 Timeouts
+
+- **Connect timeout** : 5 s.
+- **Read timeout (total)** : 30 s pour un brief de 100 mots maximum.
+- Au-delà : abort propre, fallback silencieux en texte.
+
+#### 19.12.6 Fallback gracieux
+
+Le mode vocal **n'est jamais bloquant** pour la réponse texte. Tout
+échec ElevenLabs :
+
+1. Est loggé avec contexte complet.
+2. Affiche un micro-message discret sous la réponse : *"🔇 brief vocal
+   indisponible cette fois-ci"*.
+3. Préserve la transcription textuelle du brief (elle était générée par
+   Haiku avant l'appel TTS → elle reste affichée).
+4. Ne déclenche pas de retry automatique sur les requêtes suivantes.
+
+Après 3 échecs consécutifs dans une session, le toggle se désactive
+automatiquement avec un message : *"mode vocal temporairement coupé,
+tu peux le réactiver dans les paramètres"*.
+
+#### 19.12.7 Observabilité dédiée
+
+Chaque appel ElevenLabs log :
+
+```python
+logger.info(
+    "elevenlabs_tts",
+    request_id=request_id,
+    session_id=session_id,
+    voice_id=voice_id,
+    voice_name="gaelle" | "guillaume",
+    text_length=len(script),
+    model="eleven_multilingual_v2",
+    http_status=response.status,
+    latency_ms=elapsed,
+    retry_count=n,
+    cached=cache_hit,
+    cost_eur=estimate_cost(text_length),
+)
+```
+
+Agrégation dans `/stats` (§17.3) : nombre de briefs générés, cache
+hit rate, coût cumulé, taux d'erreur.
