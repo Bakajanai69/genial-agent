@@ -7,30 +7,50 @@ persiste pas de connexion entre deux `call_tool` dans cette itération
 MVP — une itération future pourra mutualiser via un singleton asyncio).
 
 Garde-fous Pappers (cf. docs/pappers-mcp.md) :
+
 - Transport streamable-http **uniquement** (STDIO et SSE interdits).
 - Clé dans le path URL → ne **jamais** logguer l'URL complète.
 - Cache 24 h tool-level pour protéger les crédits (cahier §5.4).
 - Filtrage agressif des tools au niveau `RETAINED_TOOLS` pour réduire
   la consommation de contexte (pappers-mcp.md §6).
+
+Corrections post-review S02 (cf. phase 3) :
+
+- **B2** healthcheck contract (``tools_count`` toujours présent).
+- **C1** cap total wall-clock sur ``call_tool`` (``CALL_TOOL_BUDGET_S``).
+- **C2** heuristique crédits passée en regex à frontière de mot.
+- **C3** single-flight délégué au cache (cf. ``mcp_cache.py``).
+- **C4** résolution ``_is_degraded`` mémoïsée à module-load.
+- **C6** retry étendu à ``McpError`` / ``anyio`` / ``asyncio.TimeoutError``.
+- **C7** sérialisation ``args`` tolérante côté cache.
+- **R7** parcours de ``content`` pour trouver le 1er bloc texte.
+- **M2** base commune ``PappersError``.
+- **M3** fallback description explicite.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
+import re
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
+import anyio
 import httpx
 import structlog
 from mcp import ClientSession
-from mcp.client.streamable_http import streamable_http_client
+from mcp.client.streamable_http import StreamableHTTPError, streamable_http_client
 from mcp.shared._httpx_utils import create_mcp_http_client
+from mcp.shared.exceptions import McpError
 from tenacity import (
     retry,
     retry_if_exception,
     stop_after_attempt,
+    stop_after_delay,
     wait_exponential_jitter,
 )
 
@@ -40,19 +60,32 @@ from genial_agent.mcp_cache import cache
 logger = structlog.get_logger(__name__)
 
 PAPPERS_BASE_URL = "https://mcp.pappers.fr"
-DEFAULT_TIMEOUT_S = 30
-DEFAULT_READ_TIMEOUT = timedelta(seconds=30)
+
+# Budgets côté client. Le wall-clock total d'un ``call_tool`` (retry +
+# réseau + handshake) ne doit pas dépasser ``CALL_TOOL_BUDGET_S`` pour
+# respecter l'objectif UX < 6 s médian (cahier §4) tout en laissant une
+# marge pour les 1res requêtes à froid. Le split connect/read permet
+# d'échouer raisonnablement vite sur backend injoignable.
+CONNECT_TIMEOUT_S = 10  # TLS + DNS + 1st packet ; constaté ~1-3 s live
+READ_TIMEOUT_S = 15
+DEFAULT_READ_TIMEOUT = timedelta(seconds=READ_TIMEOUT_S)
+CALL_TOOL_BUDGET_S = 20  # wall-clock max d'un call_tool, y compris retries
 
 
 def _build_http_client() -> httpx.AsyncClient:
     """Build an httpx.AsyncClient with our default MCP timeouts.
 
-    Le SDK MCP 1.27 bascule sur `streamable_http_client` (sans
+    Le SDK MCP 1.27 bascule sur ``streamable_http_client`` (sans
     deprecation) et délègue les timeouts à l'httpx client injecté.
-    On fige un timeout global de 30 s, cohérent avec ``DEFAULT_TIMEOUT_S``.
+    Split connect/read : on échoue vite sur backend injoignable, on
+    tolère des reads un peu plus longs pour laisser Pappers cruncher.
     """
     return create_mcp_http_client(
-        timeout=httpx.Timeout(DEFAULT_TIMEOUT_S, read=DEFAULT_TIMEOUT_S),
+        timeout=httpx.Timeout(
+            READ_TIMEOUT_S,
+            connect=CONNECT_TIMEOUT_S,
+            read=READ_TIMEOUT_S,
+        ),
     )
 
 
@@ -100,7 +133,13 @@ class PappersTool:
     input_schema: dict[str, Any]  # snake_case = format Anthropic
 
 
-class CreditsExhausted(RuntimeError):
+class PappersError(RuntimeError):
+    """Base commune des erreurs métier Pappers. Permet à S03 de catcher
+    ``PappersError`` pour tomber en mode fallback sans distinguer
+    crédits vs erreur générique quand la distinction n'importe pas."""
+
+
+class CreditsExhausted(PappersError):
     """Levé quand le cap crédits journalier est atteint et que le cache
     ne contient pas la réponse demandée. Intercepté par l'agent (S03) qui
     doit rendre un message utilisateur explicite (cf. cahier §16.3).
@@ -110,7 +149,7 @@ class CreditsExhausted(RuntimeError):
     ``content[0].text``, cf. ``_extract_business_error``)."""
 
 
-class PappersToolError(RuntimeError):
+class PappersToolError(PappersError):
     """Erreur métier renvoyée par Pappers dans ``content[0].text`` sous
     la forme ``{"error": "..."}``. Contrairement à ``isError=True`` du
     protocole MCP, ce format est Pappers-spécifique et doit être
@@ -123,38 +162,60 @@ class PappersToolError(RuntimeError):
         self.message = message
 
 
+def _first_text_block(content: Any) -> str | None:
+    """Retourne le texte du premier bloc MCP de type 'text' (ou
+    présumé texte). Tolère un content vide ou des blocs non-texte en
+    tête (metadata, images) — cf. review S02 R7."""
+    if not isinstance(content, list):
+        return None
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        # MCP pré-1.10 n'impose pas toujours "type" — on accepte aussi
+        # un block qui a un champ texte sans discriminant.
+        btype = block.get("type")
+        if btype is not None and btype != "text":
+            continue
+        text = block.get("text")
+        if isinstance(text, str):
+            return text
+    return None
+
+
 def _extract_business_error(payload: dict[str, Any]) -> str | None:
     """Détecte le pattern d'erreur métier Pappers encodé dans le texte.
 
     Pappers renvoie parfois HTTP 200 + ``isError=False`` avec un contenu
     texte JSON ``{"error": "..."}`` — cas constaté pour "crédits
     insuffisants" sur les outils premium. On parse le premier bloc
-    ``content[0].text`` : si c'est un JSON dict contenant la clé
-    ``error``, on retourne la valeur. Sinon ``None`` (payload OK).
+    texte (pas forcément ``content[0]`` — cf. R7) : si c'est un JSON
+    dict contenant la clé ``error``, on retourne la valeur. Sinon
+    ``None`` (payload OK).
     """
     # Respecte aussi le flag MCP standard si Pappers le remonte un jour.
     if payload.get("isError"):
-        content = payload.get("content") or []
-        if content and isinstance(content[0], dict):
-            return content[0].get("text") or "MCP isError=True"
-        return "MCP isError=True"
+        text = _first_text_block(payload.get("content"))
+        return text or "MCP isError=True"
 
-    content = payload.get("content") or []
-    if not content or not isinstance(content[0], dict):
-        return None
-    text = content[0].get("text")
-    if not isinstance(text, str):
+    text = _first_text_block(payload.get("content"))
+    if text is None:
         return None
     try:
         parsed = json.loads(text)
     except (ValueError, TypeError):
         return None
-    if isinstance(parsed, dict) and "error" in parsed and isinstance(parsed["error"], str):
+    if isinstance(parsed, dict) and isinstance(parsed.get("error"), str):
         return parsed["error"]
     return None
 
 
-_CREDITS_HINTS = ("crédit", "credit", "credits", "crédits")
+# Regex à frontière de mot : évite les faux positifs ("discrédit",
+# "accrédité", "no credit card required"). Couvre FR/EN + variantes
+# plurielles et termes synonymes (quota, jeton, token). cf. review C2.
+_CREDITS_PATTERN = re.compile(
+    r"\b(cr[ée]dits?|credits?|quotas?|jetons?|tokens?)\b",
+    re.IGNORECASE,
+)
 
 
 def _raise_business_error(tool_name: str, message: str) -> None:
@@ -162,8 +223,7 @@ def _raise_business_error(tool_name: str, message: str) -> None:
     ``PappersToolError``. Permet à S03/S07 de distinguer un manque de
     crédits (geste utilisateur) d'une autre erreur métier (bug, SIREN
     inconnu…)."""
-    lower = message.lower()
-    if any(h in lower for h in _CREDITS_HINTS):
+    if _CREDITS_PATTERN.search(message):
         raise CreditsExhausted(f"{tool_name}: {message}")
     raise PappersToolError(tool_name, message)
 
@@ -179,12 +239,29 @@ def _build_url() -> str:
 
 
 def _is_retryable(exc: BaseException) -> bool:
-    """Tenacity predicate : retry sur 5xx / 429 / erreurs réseau, pas sur
-    4xx auth/not-found (dont 401, 403, 404)."""
+    """Tenacity predicate : retry sur 5xx / 429 / erreurs réseau /
+    protocole MCP transient — pas sur 4xx auth/not-found.
+
+    Étendu en review C6 : ``McpError``, ``StreamableHTTPError`` (niveau
+    protocole), ``anyio.EndOfStream`` / ``anyio.BrokenResourceError``
+    (HTTP/2 stream broken), ``asyncio.TimeoutError`` (notre propre
+    budget wall-clock) sont désormais retried.
+    """
     if isinstance(exc, httpx.HTTPStatusError):
         code = exc.response.status_code
         return code == 429 or 500 <= code < 600
-    return isinstance(exc, (httpx.TransportError, httpx.TimeoutException))
+    return isinstance(
+        exc,
+        (
+            httpx.TransportError,
+            httpx.TimeoutException,
+            StreamableHTTPError,
+            McpError,
+            anyio.EndOfStream,
+            anyio.BrokenResourceError,
+            asyncio.TimeoutError,
+        ),
+    )
 
 
 async def list_available_tools() -> list[PappersTool]:
@@ -217,7 +294,7 @@ async def list_available_tools() -> list[PappersTool]:
         retained.append(
             PappersTool(
                 name=t.name,
-                description=t.description or "",
+                description=t.description or f"Pappers tool: {t.name}",
                 # camelCase côté MCP → snake_case côté Anthropic.
                 # `t.inputSchema` est directement un dict JSON Schema
                 # draft 2020-12 valide, pas de massage.
@@ -236,11 +313,11 @@ async def list_available_tools() -> list[PappersTool]:
 
 def to_anthropic_schema(tools: list[PappersTool]) -> list[dict[str, Any]]:
     """Convertit des PappersTool vers la shape attendue par
-    `anthropic.messages.create(tools=[...])` : ``name``, ``description``,
-    ``input_schema``. Consommé par S03.
+    ``anthropic.messages.create(tools=[...])`` : ``name``,
+    ``description``, ``input_schema``. Consommé par S03.
 
     Contrainte Anthropic sur ``name`` : ``^[a-zA-Z0-9_-]{1,128}$`` — les
-    noms kebab-case Pappers (``informations-entreprise``) passent tels
+    noms kebab-case Pappers (``recherche-entreprises``) passent tels
     quels.
     """
     return [
@@ -254,61 +331,90 @@ def to_anthropic_schema(tools: list[PappersTool]) -> list[dict[str, Any]]:
 
 
 @retry(
-    stop=stop_after_attempt(3),
+    stop=(stop_after_attempt(3) | stop_after_delay(CALL_TOOL_BUDGET_S)),
     wait=wait_exponential_jitter(initial=0.5, max=2.0, jitter=0.1),
     retry=retry_if_exception(_is_retryable),
     reraise=True,
 )
 async def _invoke_tool_live(name: str, args: dict[str, Any]) -> dict[str, Any]:
-    """Appel réseau brut, enveloppé par le retry tenacity."""
+    """Appel réseau brut, enveloppé par le retry tenacity.
+
+    Chaque tentative est en outre bornée par ``CALL_TOOL_BUDGET_S`` via
+    ``asyncio.timeout`` — si une tentative dépasse, on échoue en
+    ``TimeoutError`` qui déclenche un retry (ou la fin du budget via
+    ``stop_after_delay``).
+    """
     url = _build_url()
-    async with (
-        _build_http_client() as http_client,
-        streamable_http_client(url, http_client=http_client) as (
-            read_stream,
-            write_stream,
-            _get_session_id,
-        ),
-        ClientSession(
-            read_stream,
-            write_stream,
-            read_timeout_seconds=DEFAULT_READ_TIMEOUT,
-        ) as session,
-    ):
-        await session.initialize()
-        result = await session.call_tool(
-            name=name,
-            arguments=args,
-            read_timeout_seconds=DEFAULT_READ_TIMEOUT,
-        )
+    async with asyncio.timeout(CALL_TOOL_BUDGET_S):
+        async with (
+            _build_http_client() as http_client,
+            streamable_http_client(url, http_client=http_client) as (
+                read_stream,
+                write_stream,
+                _get_session_id,
+            ),
+            ClientSession(
+                read_stream,
+                write_stream,
+                read_timeout_seconds=DEFAULT_READ_TIMEOUT,
+            ) as session,
+        ):
+            await session.initialize()
+            result = await session.call_tool(
+                name=name,
+                arguments=args,
+                read_timeout_seconds=DEFAULT_READ_TIMEOUT,
+            )
     # `result` = CallToolResult (pydantic). On sérialise en dict pour le
     # cache et pour l'agent (qui n'importera pas mcp.types).
     return result.model_dump(mode="json")
 
 
-def _is_degraded() -> bool:
-    """Vérifie si le mode dégradé cache-only est actif.
+# Résolution paresseuse-mais-mémoïsée du predicate de dégradation
+# (fourni par S07 via `observability/credit_guard.degraded`). Tant que
+# S07 n'est pas mergée, on renvoie toujours ``False``. Après merge,
+# l'import est tenté une seule fois (cf. review C4) — un
+# ``ImportError`` n'est pas caché par Python dans ``sys.modules`` donc
+# on doit le mémoïser manuellement pour éviter le refetch sur chaque
+# ``call_tool``.
+_degraded_fn: Callable[[], bool] | None = None
+_degraded_resolved: bool = False
 
-    L'import est local pour éviter une dépendance circulaire S02 ↔ S07 :
-    `observability/credit_guard.degraded()` sera ajouté par S07. Avant
-    S07, le fallback retourne `False` (jamais dégradé).
-    """
-    try:
-        from genial_agent.observability.credit_guard import degraded
-    except ImportError:
-        return False
-    return degraded()
+
+def _is_degraded() -> bool:
+    global _degraded_fn, _degraded_resolved
+    if not _degraded_resolved:
+        try:
+            from genial_agent.observability.credit_guard import degraded
+
+            _degraded_fn = degraded
+        except ImportError:
+            _degraded_fn = None
+        _degraded_resolved = True
+    return _degraded_fn() if _degraded_fn else False
+
+
+def _reset_degraded_cache() -> None:
+    """Testing hook : force la prochaine résolution de ``_is_degraded``
+    à retenter l'import. Usage exclusivement dans les tests."""
+    global _degraded_fn, _degraded_resolved
+    _degraded_fn = None
+    _degraded_resolved = False
 
 
 async def call_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
-    """Exécute un tool Pappers avec cache 24 h + retry tenacity.
+    """Exécute un tool Pappers avec cache 24 h + retry tenacity +
+    single-flight sur cache miss concurrent (cf. review S02 C3).
 
     Ordre :
+
     1. Cache hit → retour immédiat, 0 crédit consommé.
     2. Mode dégradé (crédits épuisés, cf. S07) → ne consulte que le
        cache ; si miss, lève ``CreditsExhausted``.
-    3. Sinon appel réseau avec retry tenacity (3 tentatives, backoff
-       expo 0.5 → 1 → 2 s + jitter). Pas de retry sur 401 / 403 / 404
+    3. Sinon appel réseau coalescé par single-flight : deux appelants
+       simultanés sur la même clé partagent un seul crédit. Retry
+       tenacity (3 tentatives, backoff expo 0.5 → 1 → 2 s + jitter,
+       cap total ``CALL_TOOL_BUDGET_S``). Pas de retry sur 4xx hors 429
        (cf. ``_is_retryable``).
     4. Si la réponse contient une erreur métier Pappers (texte JSON
        ``{"error": "..."}`` ou ``isError=True``) → **non cachée**,
@@ -324,8 +430,12 @@ async def call_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
         raise CreditsExhausted(f"Cap crédits Pappers atteint, cache miss sur {name}")
 
     started = time.monotonic()
+
+    async def _producer() -> dict[str, Any]:
+        return await _invoke_tool_live(name, args)
+
     try:
-        payload = await _invoke_tool_live(name, args)
+        payload = await cache.single_flight(name, args, _producer)
     except httpx.HTTPStatusError as exc:
         logger.warning(
             "pappers_call_http_error",
@@ -341,6 +451,9 @@ async def call_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
             "pappers_call_business_error",
             tool_name=name,
             latency_ms=int((time.monotonic() - started) * 1000),
+            # Scrubbing léger côté S02 (PII scrubbing complet ajouté
+            # par S07 §14.4) : on tronque à 200 chars pour limiter
+            # l'exposition.
             error_message=business_error[:200],
         )
         _raise_business_error(name, business_error)
@@ -355,11 +468,19 @@ async def call_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
-async def prewarm_cache() -> None:
+async def prewarm_cache(
+    call: Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
+) -> None:
     """Préchauffe le cache sur les 3 entités officielles (LVMH, BNP,
     Carrefour) pour que le mode dégradé fonctionne même en sortie de
     boot (cahier §5.4). Appelé une fois depuis ``cl.on_chat_start``
     (S06) ou le script de setup.
+
+    Args:
+        call: fonction d'appel à injecter (tests) ; défaut
+            ``call_tool``. Le paramètre est uniquement là pour
+            faciliter les tests unitaires — production utilise
+            ``call_tool`` directement.
 
     Args ``sirenisateur`` validés contre le ``inputSchema`` réel du MCP
     Pappers (probe 2026-04-24) : required = ``country_code`` +
@@ -373,10 +494,11 @@ async def prewarm_cache() -> None:
     Toute exception isolée est loggée et ignorée — le préchauffage est
     un best-effort, pas un bloquant de démarrage.
     """
+    caller = call or call_tool
     seeds = ("LVMH", "BNP Paribas", "Carrefour")
     for name in seeds:
         try:
-            await call_tool(
+            await caller(
                 "sirenisateur",
                 {"company_name": name, "country_code": "FR"},
             )
@@ -392,23 +514,40 @@ async def healthcheck() -> dict[str, Any]:
     """Vérifie la connectivité Pappers sans consommer de crédit
     (``tools/list`` est gratuit côté Pappers).
 
+    Contrat (review B2) : toutes les clés sont présentes dans les deux
+    branches, pour qu'un consumer S07 puisse faire ``result["key"]``
+    sans garde ``KeyError``.
+
     Returns:
-        {"status": "ok" | "ko", "latency_ms": int, "tools_count": int}
+        {"status": "ok" | "ko", "latency_ms": int, "tools_count": int,
+         "error": str | None}
     """
     started = time.monotonic()
     try:
         tools = await list_available_tools()
-        latency = int((time.monotonic() - started) * 1000)
-        logger.info(
-            "pappers_healthcheck_ok",
-            latency_ms=latency,
-            tools_count=len(tools),
-        )
-        return {"status": "ok", "latency_ms": latency, "tools_count": len(tools)}
     except Exception as exc:  # noqa: BLE001
+        latency = int((time.monotonic() - started) * 1000)
         logger.warning(
             "pappers_healthcheck_failed",
+            latency_ms=latency,
             error_type=type(exc).__name__,
             # Jamais logguer l'URL ni la clé
         )
-        return {"status": "ko", "latency_ms": None, "error": type(exc).__name__}
+        return {
+            "status": "ko",
+            "latency_ms": latency,
+            "tools_count": 0,
+            "error": type(exc).__name__,
+        }
+    latency = int((time.monotonic() - started) * 1000)
+    logger.info(
+        "pappers_healthcheck_ok",
+        latency_ms=latency,
+        tools_count=len(tools),
+    )
+    return {
+        "status": "ok",
+        "latency_ms": latency,
+        "tools_count": len(tools),
+        "error": None,
+    }
