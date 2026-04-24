@@ -33,6 +33,16 @@ Tout appel réseau doit être testé contre les APIs réelles.
    (`mcp_cache.py` TTL 24 h).
 5. **Unique `@cl.on_chat_start`** : S06 le crée, S10 l'étend (pas de
    redéfinition).
+6. **Tests live = opt-in** (décision S03 phase 2, 2026-04-24). Le marker
+   ``integration`` est exclu par défaut dans `pyproject.toml`.
+   - Dev Agents et Review Agents des stories S04+ : ``make test`` ou
+     ``make test-unit`` uniquement. **Ne relancez pas** les live de
+     S02/S03 — vous n'observerez rien d'utile pour votre story et vous
+     brûlerez des crédits Pappers.
+   - Pré-démo (S09) / debug de régression : ``make test-integration``
+     ou ``make test-all``.
+   - Justification complète : cf. S03-agent-core.md §"Stratégie de
+     tests".
 
 ---
 

@@ -1,4 +1,4 @@
-.PHONY: install run test test-unit test-integration lint format docker-build precommit
+.PHONY: install run test test-unit test-integration test-all lint format docker-build precommit
 
 install:
 	uv sync --extra dev
@@ -7,15 +7,29 @@ install:
 run:
 	uv run chainlit run src/genial_agent/app.py -w
 
+# Default `make test` = unit seulement. Rapide, gratuit, lancé par les
+# Dev Agents et Review Agents de chaque story. Voir `test-integration`
+# et `test-all` pour les live tests (opt-in).
 test:
 	uv run pytest tests/unit -v
-	uv run pytest tests/integration -v --tb=short || true
 
 test-unit:
 	uv run pytest tests/unit -v
 
+# Live tests — consomme des crédits Anthropic + Pappers (~2-5 min, ~12
+# crédits Pappers par run S03). À lancer explicitement :
+#   - S09 pre-démo ;
+#   - debug d'une régression détectée par un unit test insuffisant ;
+#   - smoke test hebdo.
+# Le ``-m integration`` override le ``-m 'not integration'`` posé par
+# défaut dans pyproject.toml.
 test-integration:
-	uv run pytest tests/integration -v
+	uv run pytest tests/integration -v -m integration
+
+# Convenience: tout jouer (unit + integration). Pré-démo uniquement.
+test-all:
+	uv run pytest tests/unit -v
+	uv run pytest tests/integration -v -m integration
 
 lint:
 	uv run ruff check src tests

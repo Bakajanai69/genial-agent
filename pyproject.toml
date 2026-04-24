@@ -36,9 +36,19 @@ packages = ["src/genial_agent"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["src"]
-addopts = "-ra --strict-markers --strict-config"
+# Exclusion par défaut du marker ``integration`` : les tests live
+# (Anthropic + Pappers) coûtent des crédits et prennent plusieurs
+# minutes. Les Dev Agents et Review Agents de S04+ n'ont pas besoin
+# de les rejouer — ils consomment le contrat de S03 (events, signatures)
+# pas ses logs. Pour les jouer explicitement :
+#
+#   make test-integration     # ou : pytest -m integration tests/integration
+#
+# ``make test`` / ``make test-unit`` restent rapides et gratuits.
+# Détails dans docs/stories/S03-agent-core.md §"Stratégie de tests".
+addopts = "-ra --strict-markers --strict-config -m 'not integration'"
 markers = [
-    "integration: requires real API keys (skipped when absent)",
+    "integration: live tests against real API keys (opt-in, consomme des crédits). Run via make test-integration.",
 ]
 
 [tool.ruff]
