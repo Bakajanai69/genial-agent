@@ -692,3 +692,177 @@ Fabien puisse tester en 5 min sans poser de question. Contenu cible :
 - Lien Loom de backup.
 - Instructions pour relancer en local (`make run` après clone).
 - Email pour me signaler.
+
+---
+
+## 19. Stretch — Mode "brief vocal" immersif
+
+Feature optionnelle qui ajoute une dimension audio immersive : à chaque
+réponse, un **brief radio de 30–40 secondes** est généré et lu par une
+voix professionnelle française via ElevenLabs.
+
+### 19.1 Gating (conditions de démarrage)
+
+On **n'ouvre ce chantier que si**, le samedi soir à 23 h, tout ce qui
+suit est vert :
+
+- [ ] 3 tests officiels Pappers OK sur l'URL Railway publique.
+- [ ] Routing Haiku/Sonnet fonctionnel avec badges UI.
+- [ ] Pack adversarial (§15) à 8/10 minimum.
+- [ ] Empty state + starters + SIREN cliquables opérationnels.
+- [ ] `EVALUATION.md` rédigé.
+- [ ] Healthcheck + keep-alive UptimeRobot actifs.
+
+Si un seul item est rouge, on skip §19 et on documente la feature
+comme "next step" dans le README. **Pas de négociation sur ce gating**.
+
+### 19.2 Concept produit
+
+Ni "TTS de la réponse brute" (invivable : lire "SIREN 775670417" à
+voix haute), ni TTS de la chaîne de raisonnement (tool calls sont
+fondamentalement visuels). On produit une **troisième sortie dédiée
+à la voix** : un script narratif court pensé pour l'oreille, style
+news anchor financier.
+
+Exemple de brief attendu pour la requête "Mandats Bernard Arnault" :
+
+> *« Bernard Arnault contrôle actuellement douze mandats en France,
+> dont la présidence de LVMH et du holding familial. Parmi les
+> sociétés notables : Christian Dior SE, Financière Agache, et le
+> Groupe Arnault. Son réseau croise celui de Delphine Arnault sur
+> trois conseils d'administration. Ces données datent du dernier
+> bilan 2023. »*
+
+30 secondes. Pas de SIREN à l'oral. Pas de chiffres à décimales. Une
+narration qu'on peut écouter en voiture ou en préparant un RDV.
+
+### 19.3 Architecture
+
+```
+User tape "Mandats Bernard Arnault"
+         │
+         ▼
+   Agent (Haiku/Sonnet) + MCP Pappers
+         │
+         ├─ Streaming texte → UI (chemin critique, inchangé)
+         │
+         └─ Réponse structurée complète
+                  │
+                  ▼
+         ┌────────────────────────┐
+         │ Toggle "🔊 Brief vocal"│
+         └────────────────────────┘
+                  │ activé
+                  ▼
+         Briefer Haiku 4.5 (parallèle, non-bloquant)
+         - Input : requête + réponse structurée validée
+         - Output : script narratif ≤ 100 mots, style radio
+                  │
+                  ▼
+         ElevenLabs TTS streaming
+         - Modèle : `eleven_multilingual_v2`
+         - Voix : choix utilisateur Gaëlle / Guillaume
+                  │
+                  ▼
+         Lecteur audio inline Chainlit (`cl.Audio`)
+         + transcription affichée sous le lecteur (accessibilité)
+```
+
+**Principes clés** :
+- Le brief est **hors chemin critique** : le texte s'affiche toujours
+  en premier, l'audio arrive en parallèle.
+- Le briefer ne reçoit que **la sortie déjà validée** par le
+  validateur déterministe (§14.3 C5) → impossible d'halluciner un
+  SIREN dans le brief.
+- Le script est **toujours affiché en texte** sous le lecteur audio
+  pour WCAG (accessibilité sourds / malentendants). Signal enterprise
+  solide.
+
+### 19.4 Décisions produit
+
+| # | Décision | Choix retenu | Raison |
+|---|---|---|---|
+| D1 | État par défaut du toggle | **OFF** | Jamais d'autoplay forcé, UX fondamentale |
+| D2 | Activation | 5ème starter cliquable *"🔊 Active le brief vocal"* + toggle dans settings Chainlit | Découvrable sans être intrusif |
+| D3 | Scope d'application | Toutes les requêtes U1–U5 si toggle ON | Cohérence, pas de règles cachées |
+| D4 | Longueur du script | ≤ 100 mots (~40 s à débit normal) | Budget char ElevenLabs maîtrisé, durée supportable |
+| D5 | Langue du brief | Toujours français | Cohérence avec le scope FR |
+| D6 | Affichage transcription sous l'audio | Toujours | WCAG + signal enterprise |
+| D7 | Cap par session | 20 briefs audio max | Protection crédits ElevenLabs |
+| D8 | Fallback si ElevenLabs KO | Message discret *"mode vocal indispo, texte OK"* | Ne jamais bloquer la réponse principale |
+
+### 19.5 Voix ElevenLabs retenues
+
+| Choix | Voix | ID ElevenLabs |
+|---|---|---|
+| Femme (défaut) | **Gaëlle** | `tKaoyJLW05zqV0tIH9FD` |
+| Homme | **Guillaume** | `ohItIVrXTBI80RrUECOD` |
+
+- Sélecteur dans les paramètres Chainlit (`cl.ChatSettings`).
+- Valeur par défaut : Gaëlle.
+- Les IDs sont de la **configuration**, pas des secrets — peuvent être
+  committés.
+
+### 19.6 Configuration et secrets
+
+Ajouts `.env.example` :
+
+```bash
+ELEVENLABS_API_KEY=          # Secret, jamais commit
+ELEVENLABS_VOICE_GAELLE=tKaoyJLW05zqV0tIH9FD   # Config
+ELEVENLABS_VOICE_GUILLAUME=ohItIVrXTBI80RrUECOD # Config
+ELEVENLABS_MODEL_ID=eleven_multilingual_v2     # Config
+ENABLE_VOICE_BRIEF=true      # Feature flag global
+```
+
+Comme pour Pappers : clé lue côté serveur uniquement, jamais exposée
+au client, jamais loguée, scrubbing dans les logs applicatifs.
+
+### 19.7 Prompt du briefer Haiku
+
+System prompt séparé (single-responsibility, ne contamine pas l'agent
+principal) :
+
+> *"Tu es un journaliste financier qui rédige un brief audio de 30 à
+> 40 secondes à partir des données fournies. Règles strictes : ne jamais
+> énoncer de SIREN, ne jamais lire un nombre à décimales (arrondir),
+> pas plus de 100 mots, style narratif fluide pour l'oreille, ton
+> neutre et factuel. Utilise des transitions naturelles, pas de
+> bullet points. Conclure par la date du bilan source si pertinent."*
+
+### 19.8 Risques spécifiques
+
+| # | Risque | Mitigation |
+|---|---|---|
+| R19 | ElevenLabs KO ou crédits épuisés | Fallback silencieux en mode texte + message discret sous le message *"mode vocal indispo"* |
+| R20 | Autoplay Chrome bloqué au 1er visit | L'activation manuelle du toggle par l'utilisateur compte comme interaction → autoplay autorisé pour les briefs suivants |
+| R21 | Clé ElevenLabs fuitée | Même pattern Pappers : env var, jamais log, jamais client-side, scrubbing |
+| R22 | Script TTS hallucine une donnée | Le briefer ne voit que la sortie déjà validée par §14.3 C5, pas de tool calls bruts → impossible |
+| R23 | Latence ElevenLabs > latence texte | Génération en parallèle, audio arrive après le texte, UX reste fluide |
+| R24 | Sur-coût crédits sur démo concurrente | Cap 20 briefs / session + feature flag global désactivable à chaud via env var Railway |
+
+### 19.9 Coût estimé pour le week-end
+
+- ElevenLabs `multilingual_v2` : ~$0.18 / 1000 chars.
+- 100 mots ≈ 600 chars → **~$0.10 par brief**.
+- Week-end avec 30 briefs (nous + Fabien + équipe) : **~$3**.
+- Négligeable, pas de surveillance budgétaire complexe nécessaire.
+
+### 19.10 Gain démo attendu
+
+- **Scénario 7 du Loom** : "tape Fiche LVMH avec brief vocal activé,
+  regarde : réponse texte complète à l'écran + voix professionnelle
+  qui te fait un brief radio en 30 s. Parfait pour un commercial qui
+  prépare un RDV en voiture." → 20 s de vidéo, effet différentiant
+  maximal.
+- **Message implicite à Fabien** : "je sais intégrer plusieurs APIs
+  modernes proprement, avec gating et feature flag, sans dégrader
+  l'expérience de base."
+
+### 19.11 Livrables additionnels si §19 activé
+
+- L12 : toggle vocal fonctionnel avec les deux voix.
+- L13 : sélecteur de voix dans les settings Chainlit.
+- L14 : scénario 7 ajouté au Loom.
+- L15 : entrée dédiée dans `EVALUATION.md` ("active le brief vocal et
+  écoute Gaëlle te briefer sur LVMH").
