@@ -1,6 +1,6 @@
 # S01 — Scaffold du repo
 
-> **Statut** : 🟡 refined (phase 1 terminée 2026-04-24)
+> **Statut** : ✅ approved (phase 3 terminée 2026-04-24)
 > **Durée estimée** : 45 min
 > **Parallélisable avec** : — (fondation)
 
@@ -522,30 +522,56 @@ uv run pre-commit run --all-files  # doit passer
 
 ## 🔍 Phase 3 — Review Agent
 
-### Check-list spécifique
+### Check-list spécifique — ✅ vérifiée 2026-04-24
 
-- [ ] `pyproject.toml` : toutes les deps sont en **caret-range**
+- [x] `pyproject.toml` : toutes les deps sont en **caret-range**
       (`>=X.Y,<X+1`) — pas de `*` nu, pas de `>=X` sans borne haute.
       `uv.lock` présent et committé fige les versions exactes pour
-      CI/Docker.
-- [ ] `.gitignore` couvre bien `.env`, `.venv`, `.chainlit`. `uv.lock`
-      **n'y est pas** (doit être tracké).
-- [ ] `.env.example` n'a aucune valeur secrète (pour les voice IDs
+      CI/Docker (2210 lignes, anthropic 0.97.0 / mcp 1.27.0 /
+      chainlit 2.11.1 / pytest-asyncio 1.3.0).
+- [x] `.gitignore` couvre bien `.env`, `.venv`, `.chainlit`. `uv.lock`
+      **n'y est pas** (confirmé `git ls-files | grep uv.lock` → tracké).
+- [x] `.env.example` n'a aucune valeur secrète (pour les voice IDs
       ElevenLabs et `ELEVENLABS_MODEL_ID` c'est OK, ce sont des
-      constantes publiques documentées au cahier §19.5).
-- [ ] `Dockerfile` utilise un user non-root (`USER agent`) et l'image
+      constantes publiques documentées au cahier §19.5). Allowlist
+      dédiée dans `.gitleaks.toml` — bonus, scope limité à `.env.example`.
+- [x] `Dockerfile` utilise un user non-root (`USER agent`) et l'image
       buildée localement (`docker build -t genial-agent:local .`)
-      retourne 0.
-- [ ] CI GitHub Actions s'exécute et passe (onglet Actions sur
-      GitHub, commit de phase 2).
-- [ ] `make install` fonctionne depuis un clone frais
-      (`git clone && cd genial-agent && make install`).
-- [ ] `gitleaks detect --source .` retourne 0 issue.
-- [ ] `pre-commit run --all-files` retourne 0.
-- [ ] Pas de TODO / FIXME oublié dans les fichiers scaffoldés.
-- [ ] Cahier §5.1 : soit amendé (remplace "Claude Agent SDK" par
-      "Anthropic SDK + MCP SDK"), soit une note est ajoutée dans
-      le README pointant vers cette clarification (élicitation S01).
+      retourne 0. Vérifié `docker run` → `uid=1000(agent)`.
+- [ ] CI GitHub Actions s'exécute et passe (non vérifié en local —
+      YAML inspecté, cohérent avec la spec, à confirmer au push).
+- [x] `make install` fonctionne depuis un clone frais
+      (`.venv` généré, `uv.lock` respecté).
+- [x] `gitleaks detect --source .` retourne 0 issue sur l'historique
+      git. Le `.env` local non-tracké contient évidemment les vraies
+      clés, mais il est correctement gitignoré (`git check-ignore`
+      ok) et jamais committé (`git log --all --full-history -- .env`
+      vide).
+- [x] `pre-commit run --all-files` retourne 0 (10 hooks verts dont
+      gitleaks + ruff + ruff-format).
+- [x] Pas de TODO / FIXME oublié dans les fichiers scaffoldés.
+- [x] Cahier §5.1 : note ajoutée dans le README (lignes 21-24)
+      pointant vers la clarification `anthropic` + `mcp` vs package
+      PyPI `claude-agent-sdk`.
+
+### Observations non-bloquantes (améliorations futures)
+
+1. **`make test` masque les échecs d'intégration** — la cible chaîne
+   unit + integration avec `|| true` sur l'intégration. Cohérent avec
+   la spec (pas de test d'intégration en S01), mais à durcir quand
+   S02 ajoutera les vrais tests MCP pour éviter les faux positifs
+   vert/rouge.
+2. **`astral-sh/setup-uv@v8` non-pinné SHA** — déjà documenté comme
+   "next step" dans le README et accepté pour un exo week-end.
+3. **Divergence `uv` version** — Dockerfile builder utilise
+   `ghcr.io/astral-sh/uv:0.11.7`, local en `0.10.6`. Pas de conflit
+   fonctionnel (lock respecté), mais un `uv sync --frozen` produit
+   le même `.venv` quelle que soit la version uv.
+4. **`.gitleaks.toml` hors spec** — introduit par le dev agent pour
+   allowlister les voice IDs ElevenLabs dans `.env.example`.
+   Justifié (cahier §19.5 les qualifie de constantes publiques),
+   scope limité à ce seul fichier, `useDefault = true` conserve
+   toutes les règles standards.
 
 ### Commit phase 3
 
@@ -555,20 +581,26 @@ uv run pre-commit run --all-files  # doit passer
 
 ## ✅ Critères d'acceptation
 
-- [ ] `make install` retourne 0.
-- [ ] `make lint` retourne 0.
-- [ ] `make test` retourne 0 avec 1 test passant.
-- [ ] `make docker-build` retourne 0.
-- [ ] `pre-commit run --all-files` retourne 0.
-- [ ] CI GitHub est verte sur le commit de phase 2.
-- [ ] `gitleaks detect` ne trouve rien.
+- [x] `make install` retourne 0.
+- [x] `make lint` retourne 0 (ruff check + format check verts,
+      5 fichiers formatés).
+- [x] `make test` retourne 0 avec 2 tests passant
+      (`test_package_importable`, `test_package_has_version`).
+- [x] `make docker-build` retourne 0 (image `genial-agent:local`,
+      stage final non-root uid 1000).
+- [x] `pre-commit run --all-files` retourne 0.
+- [ ] CI GitHub est verte sur le commit de phase 2 (à vérifier
+      après push — YAML inspecté et cohérent).
+- [x] `gitleaks detect` sur l'historique git ne trouve rien.
 
 ---
 
 ## 📦 Done when
 
-- [ ] Phase 1 commitée (`story(S01): refine`).
-- [ ] Phase 2 commitée (`feat(S01): scaffold`) + tests verts.
-- [ ] Phase 3 approuvée (`review(S01): approved`).
-- [ ] Ligne S01 mise à jour dans `docs/stories/README.md` → ✅.
-- [ ] Push sur `claude/builder-evaluation-exercise-34Iyu`.
+- [x] Phase 1 commitée (`story(S01): refine`) — commit `4e73789`.
+- [x] Phase 2 commitée (`feat(S01): scaffold`) — commit `cc562a1`,
+      tests verts.
+- [x] Phase 3 approuvée (`review(S01): approved`).
+- [x] Ligne S01 mise à jour dans `docs/stories/README.md` → ✅.
+- [ ] Push sur `claude/builder-evaluation-exercise-34Iyu`
+      (à faire manuellement après le commit review).

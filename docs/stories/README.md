@@ -185,7 +185,7 @@ opérationnelles.
 
 | # | Story | Statut | Dépend de | Parallèle avec |
 |---|---|---|---|---|
-| S01 | [Scaffold repo](./S01-scaffold.md) | 🟡 phase 2 faite | — | — |
+| S01 | [Scaffold repo](./S01-scaffold.md) | ✅ approved | — | — |
 | S02 | [Client MCP Pappers](./S02-mcp-pappers.md) | ⬜ à faire | S01 | — |
 | S03 | [Agent Claude core](./S03-agent-core.md) | ⬜ à faire | S02 | — |
 | S04 | [Routing Haiku↔Sonnet](./S04-routing.md) | ⬜ à faire | S03 | — |
