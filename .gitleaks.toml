@@ -1,0 +1,18 @@
+# Gitleaks configuration — extends the default ruleset.
+#
+# Allowlist les IDs de voix ElevenLabs qui sont des constantes publiques
+# (cahier des charges §19.5, officielles documentées côté ElevenLabs).
+# Tout le reste reste scanné normalement.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "ElevenLabs public voice IDs (cahier §19.5)"
+regexes = [
+  '''tKaoyJLW05zqV0tIH9FD''',
+  '''ohItIVrXTBI80RrUECOD''',
+]
+paths = [
+  '''\.env\.example$''',
+]
