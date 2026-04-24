@@ -24,7 +24,16 @@ def test_build_url_fails_if_no_key(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_retained_tools_is_set() -> None:
     assert isinstance(mcp_pappers.RETAINED_TOOLS, set)
-    assert {"sirenisateur", "informations-entreprise"} <= mcp_pappers.RETAINED_TOOLS
+    # Baseline : sirenisateur + recherche-entreprises (non premium,
+    # vérifiés live contre Pappers le 2026-04-24).
+    assert {"sirenisateur", "recherche-entreprises"} <= mcp_pappers.RETAINED_TOOLS
+
+
+def test_informations_entreprise_excluded_premium() -> None:
+    """``informations-entreprise`` est Premium côté Pappers et renvoie
+    systématiquement "crédits insuffisants" avec le pack offert. Retiré
+    de ``RETAINED_TOOLS`` pour ne pas polluer le prompt agent."""
+    assert "informations-entreprise" not in mcp_pappers.RETAINED_TOOLS
 
 
 def test_is_retryable_401_403_404_not_retried() -> None:
@@ -102,3 +111,117 @@ async def test_call_tool_degraded_cache_miss_raises(
     # Args uniques pour éviter les résidus cache d'autres tests.
     with pytest.raises(mcp_pappers.CreditsExhausted):
         await mcp_pappers.call_tool("informations-entreprise", {"siren": "deadbeef-degraded"})
+
+
+# ── Erreurs métier Pappers encodées dans content[0].text ──────────────
+
+
+def test_extract_business_error_credits_message() -> None:
+    payload = {
+        "isError": False,
+        "content": [
+            {
+                "type": "text",
+                "text": (
+                    '{"error": "Vous n\'avez pas de crédits suffisants pour exécuter cet outil."}'
+                ),
+            }
+        ],
+    }
+    msg = mcp_pappers._extract_business_error(payload)
+    assert msg is not None
+    assert "crédits" in msg.lower()
+
+
+def test_extract_business_error_respects_mcp_is_error_flag() -> None:
+    payload = {
+        "isError": True,
+        "content": [{"type": "text", "text": "MCP error -32602: Invalid arguments"}],
+    }
+    msg = mcp_pappers._extract_business_error(payload)
+    assert msg is not None
+    assert "Invalid" in msg
+
+
+def test_extract_business_error_returns_none_on_valid_payload() -> None:
+    payload = {
+        "isError": False,
+        "content": [
+            {
+                "type": "text",
+                "text": (
+                    '{"possibilities": [{"company_number": "775670417", "company_name": "LVMH"}]}'
+                ),
+            }
+        ],
+    }
+    assert mcp_pappers._extract_business_error(payload) is None
+
+
+def test_extract_business_error_tolerates_non_json_text() -> None:
+    payload = {
+        "isError": False,
+        "content": [{"type": "text", "text": "not a json blob"}],
+    }
+    assert mcp_pappers._extract_business_error(payload) is None
+
+
+def test_extract_business_error_tolerates_empty_content() -> None:
+    assert mcp_pappers._extract_business_error({"isError": False, "content": []}) is None
+
+
+async def test_call_tool_credits_error_raises_and_does_not_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pappers renvoie HTTP 200 + isError=False + JSON {"error": "crédits…"} :
+    call_tool doit lever ``CreditsExhausted`` **et ne rien cacher**, pour
+    qu'un retour de crédits laisse un prochain appel repartir."""
+    monkeypatch.setattr(mcp_pappers, "_is_degraded", lambda: False)
+
+    async def _returns_credits_error(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return {
+            "isError": False,
+            "content": [
+                {
+                    "type": "text",
+                    "text": '{"error": "Vous n\'avez pas de crédits suffisants"}',
+                }
+            ],
+        }
+
+    monkeypatch.setattr(mcp_pappers, "_invoke_tool_live", _returns_credits_error)
+    args = {"siren": "credits-err-unique"}
+    # On nettoie toute entrée cache laissée par un autre test.
+    mcp_pappers.cache._store.pop(  # noqa: SLF001
+        mcp_pappers.cache.key("informations-entreprise", args), None
+    )
+
+    with pytest.raises(mcp_pappers.CreditsExhausted):
+        await mcp_pappers.call_tool("informations-entreprise", args)
+
+    # Garanti : l'erreur n'a PAS été cachée.
+    assert await mcp_pappers.cache.get("informations-entreprise", args) is None
+
+
+async def test_call_tool_tool_error_raises_pappers_tool_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Erreur métier hors crédits → ``PappersToolError``, pas de cache."""
+    monkeypatch.setattr(mcp_pappers, "_is_degraded", lambda: False)
+
+    async def _returns_generic_error(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return {
+            "isError": False,
+            "content": [{"type": "text", "text": '{"error": "SIREN introuvable"}'}],
+        }
+
+    monkeypatch.setattr(mcp_pappers, "_invoke_tool_live", _returns_generic_error)
+    args = {"siren": "unknown-unique"}
+    mcp_pappers.cache._store.pop(  # noqa: SLF001
+        mcp_pappers.cache.key("recherche-entreprises", args), None
+    )
+
+    with pytest.raises(mcp_pappers.PappersToolError) as exc_info:
+        await mcp_pappers.call_tool("recherche-entreprises", args)
+    assert "SIREN introuvable" in str(exc_info.value)
+    assert await mcp_pappers.cache.get("recherche-entreprises", args) is None

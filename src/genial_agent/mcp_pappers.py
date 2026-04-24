@@ -16,6 +16,7 @@ Garde-fous Pappers (cf. docs/pappers-mcp.md) :
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass
 from datetime import timedelta
@@ -59,18 +60,23 @@ def _build_http_client() -> httpx.AsyncClient:
 # réduire les tokens et le coût en crédits). Liste figée à partir du
 # probe réel du 2026-04-24 contre le MCP Pappers.
 #
-# Couverture U1-U5 (cahier §3) :
-#   U1 identité        → sirenisateur + informations-entreprise
+# Couverture U1-U5 (cahier §3) — version compatible pack API offert
+# (100 crédits, sans les tools Premium) :
+#   U1 identité        → sirenisateur + recherche-entreprises
 #   U2 cartographie    → sirenisateur + recherche-dirigeants
 #                        + cartographie-entreprise
-#   U3 comparaison     → sirenisateur + informations-entreprise
-#                        + comptes-entreprise
+#   U3 comparaison     → sirenisateur + comptes-entreprise
+#                        + recherche-entreprises
 #   U4 recherche       → recherche-entreprises
 #   U5 KYC             → conformite-personne-physique
 #                        + recherche-beneficiaires
+#
+# ⚠ ``informations-entreprise`` retiré : outil Premium Pappers, renvoie
+# systématiquement "crédits insuffisants" avec le pack 100 crédits
+# offert (probe 2026-04-24). Activable dans une itération future si
+# l'utilisateur souscrit à un pack supérieur.
 RETAINED_TOOLS: set[str] = {
     "sirenisateur",
-    "informations-entreprise",
     "recherche-entreprises",
     "comptes-entreprise",
     "cartographie-entreprise",
@@ -97,7 +103,69 @@ class PappersTool:
 class CreditsExhausted(RuntimeError):
     """Levé quand le cap crédits journalier est atteint et que le cache
     ne contient pas la réponse demandée. Intercepté par l'agent (S03) qui
-    doit rendre un message utilisateur explicite (cf. cahier §16.3)."""
+    doit rendre un message utilisateur explicite (cf. cahier §16.3).
+
+    Également levé quand Pappers refuse l'exécution d'un outil pour
+    cause de crédits insuffisants (message encodé dans
+    ``content[0].text``, cf. ``_extract_business_error``)."""
+
+
+class PappersToolError(RuntimeError):
+    """Erreur métier renvoyée par Pappers dans ``content[0].text`` sous
+    la forme ``{"error": "..."}``. Contrairement à ``isError=True`` du
+    protocole MCP, ce format est Pappers-spécifique et doit être
+    détecté explicitement. **Non caché** pour éviter d'empoisonner le
+    cache avec une erreur (le prochain appel identique retente)."""
+
+    def __init__(self, tool_name: str, message: str) -> None:
+        super().__init__(f"{tool_name}: {message}")
+        self.tool_name = tool_name
+        self.message = message
+
+
+def _extract_business_error(payload: dict[str, Any]) -> str | None:
+    """Détecte le pattern d'erreur métier Pappers encodé dans le texte.
+
+    Pappers renvoie parfois HTTP 200 + ``isError=False`` avec un contenu
+    texte JSON ``{"error": "..."}`` — cas constaté pour "crédits
+    insuffisants" sur les outils premium. On parse le premier bloc
+    ``content[0].text`` : si c'est un JSON dict contenant la clé
+    ``error``, on retourne la valeur. Sinon ``None`` (payload OK).
+    """
+    # Respecte aussi le flag MCP standard si Pappers le remonte un jour.
+    if payload.get("isError"):
+        content = payload.get("content") or []
+        if content and isinstance(content[0], dict):
+            return content[0].get("text") or "MCP isError=True"
+        return "MCP isError=True"
+
+    content = payload.get("content") or []
+    if not content or not isinstance(content[0], dict):
+        return None
+    text = content[0].get("text")
+    if not isinstance(text, str):
+        return None
+    try:
+        parsed = json.loads(text)
+    except (ValueError, TypeError):
+        return None
+    if isinstance(parsed, dict) and "error" in parsed and isinstance(parsed["error"], str):
+        return parsed["error"]
+    return None
+
+
+_CREDITS_HINTS = ("crédit", "credit", "credits", "crédits")
+
+
+def _raise_business_error(tool_name: str, message: str) -> None:
+    """Lève ``CreditsExhausted`` si le message parle de crédits, sinon
+    ``PappersToolError``. Permet à S03/S07 de distinguer un manque de
+    crédits (geste utilisateur) d'une autre erreur métier (bug, SIREN
+    inconnu…)."""
+    lower = message.lower()
+    if any(h in lower for h in _CREDITS_HINTS):
+        raise CreditsExhausted(f"{tool_name}: {message}")
+    raise PappersToolError(tool_name, message)
 
 
 def _build_url() -> str:
@@ -242,7 +310,10 @@ async def call_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
     3. Sinon appel réseau avec retry tenacity (3 tentatives, backoff
        expo 0.5 → 1 → 2 s + jitter). Pas de retry sur 401 / 403 / 404
        (cf. ``_is_retryable``).
-    4. Stocke dans le cache et retourne.
+    4. Si la réponse contient une erreur métier Pappers (texte JSON
+       ``{"error": "..."}`` ou ``isError=True``) → **non cachée**,
+       lève ``CreditsExhausted`` (si crédits) ou ``PappersToolError``.
+    5. Sinon stocke dans le cache et retourne.
     """
     cached = await cache.get(name, args)
     if cached is not None:
@@ -263,11 +334,22 @@ async def call_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
             # `.response.url` contient la clé → jamais logger
         )
         raise
+
+    business_error = _extract_business_error(payload)
+    if business_error is not None:
+        logger.warning(
+            "pappers_call_business_error",
+            tool_name=name,
+            latency_ms=int((time.monotonic() - started) * 1000),
+            error_message=business_error[:200],
+        )
+        _raise_business_error(name, business_error)
+
     logger.info(
         "pappers_call_ok",
         tool_name=name,
         latency_ms=int((time.monotonic() - started) * 1000),
-        is_error=bool(payload.get("isError")),
+        is_error=False,
     )
     await cache.set(name, args, payload)
     return payload
@@ -279,25 +361,25 @@ async def prewarm_cache() -> None:
     boot (cahier §5.4). Appelé une fois depuis ``cl.on_chat_start``
     (S06) ou le script de setup.
 
-    Stratégie : tenter ``sirenisateur`` (résolution nom→SIREN) sur chaque
-    entité, puis ``informations-entreprise`` sur le SIREN obtenu. Toute
-    exception isolée est loggée et ignorée — le préchauffage est un
-    best-effort, pas un bloquant de démarrage.
+    Args ``sirenisateur`` validés contre le ``inputSchema`` réel du MCP
+    Pappers (probe 2026-04-24) : required = ``country_code`` +
+    ``company_name``.
+
+    On **ne tente pas** ``informations-entreprise`` ici : cet outil
+    Pappers est premium et renvoie "crédits insuffisants" sur les packs
+    API offerts (100 crédits). Pour le MVP, la fiche identité est
+    servie via ``recherche-entreprises`` (non-premium, vérifié live).
+
+    Toute exception isolée est loggée et ignorée — le préchauffage est
+    un best-effort, pas un bloquant de démarrage.
     """
     seeds = ("LVMH", "BNP Paribas", "Carrefour")
     for name in seeds:
         try:
-            siren_res = await call_tool("sirenisateur", {"query": name})
-            # Le schéma exact de la réponse dépend de Pappers — on
-            # extrait le premier SIREN trouvé.
-            structured = siren_res.get("structuredContent") or {}
-            siren = None
-            for item in structured.get("results", []) or []:
-                if item.get("siren"):
-                    siren = item["siren"]
-                    break
-            if siren:
-                await call_tool("informations-entreprise", {"siren": siren})
+            await call_tool(
+                "sirenisateur",
+                {"company_name": name, "country_code": "FR"},
+            )
         except Exception as exc:  # noqa: BLE001
             logger.info(
                 "pappers_prewarm_skip",
