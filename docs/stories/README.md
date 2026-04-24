@@ -199,7 +199,7 @@ opérationnelles.
 | S02 | [Client MCP Pappers](./S02-mcp-pappers.md) | ✅ approved | S01 | — |
 | S03 | [Agent Claude core](./S03-agent-core.md) | ✅ approved | S02 | — |
 | S04 | [Routing Haiku↔Sonnet](./S04-routing.md) | 🟡 en cours (dev done) | S03 | — |
-| S05 | [Garde-fous 6 couches](./S05-guardrails.md) | ⬜ à faire | S03 | S06 |
+| S05 | [Garde-fous 6 couches](./S05-guardrails.md) | 🟡 en cours (dev done) | S03 | S06 |
 | S06 | [UI Chainlit](./S06-chainlit-ui.md) | ⬜ à faire | S03 | S05 |
 | S07 | [Observabilité + healthcheck](./S07-observability.md) | ⬜ à faire | S01, S03 | S08 |
 | S08 | [Déploiement Railway](./S08-deployment.md) | ⬜ à faire | S01, S07 | S07 |
