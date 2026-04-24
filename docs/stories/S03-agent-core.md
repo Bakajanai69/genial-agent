@@ -325,15 +325,25 @@ pas en runtime).
 
 #### Gestion erreurs Anthropic
 
-- `AuthenticationError` / `BadRequestError` → laisse remonter.
-  Config cassée ou prompt trop long : ne pas masquer.
-- `RateLimitError` → le SDK Anthropic retry déjà 2 fois en interne
-  (`max_retries=2` par défaut). Au-delà, laisse remonter avec un
-  event `end(reason="rate_limited")`. L'UI S06 affiche un message
-  utilisateur cadré.
-- `APIConnectionError` / `APITimeoutError` → laisse remonter, event
-  `end(reason="transport_error")`. S06 affiche "API Claude
-  temporairement indispo".
+**Mise à jour phase 3 (review fix I1)** : toutes les erreurs API
+reconnues sont désormais **captées par ``run_turn``** et converties en
+event ``end`` typé — aucune exception ne remonte dans l'async
+generator du consumer. La UI S06 peut toujours clôturer sa step view.
+
+- `RateLimitError` → event ``end(reason="rate_limited")``. Le SDK
+  Anthropic retry déjà 2 fois en interne (`max_retries=2`) avant de
+  lever.
+- `APIConnectionError` (inclut ``APITimeoutError`` par héritage) →
+  event ``end(reason="transport_error")``. Loggué en ``warning``
+  avec ``exc_info=True``.
+- `APIStatusError` (tous sauf 429 : ``AuthenticationError`` 401,
+  ``BadRequestError`` 400, ``PermissionDeniedError`` 403,
+  ``NotFoundError`` 404, ``UnprocessableEntityError`` 422,
+  ``InternalServerError`` 500, etc.) → event
+  ``end(reason="api_error")``. Loggué en ``error`` avec ``exc_info``
+  et ``status_code``. C'est une vraie anomalie (clé révoquée, prompt
+  trop long, indispo Anthropic) : le log tech est exploitable pour
+  diagnostic post-mortem, la UI reste fonctionnelle.
 
 #### Configuration `inference_geo`
 
@@ -366,8 +376,10 @@ S03 réécrits pour passer par `sirenisateur` (résolution SIREN) +
 - [x] `tool_choice` : `"auto"` partout en MVP (justifié ci-dessus).
 - [x] Historique : pas de trimming MVP, justifié.
 - [x] Erreurs Pappers : mappées vers `tool_result is_error=True`.
-- [x] Erreurs Anthropic : laissées remonter sauf `RateLimitError`
-      captée en event `end`.
+- [x] Erreurs Anthropic : **toutes** converties en event ``end`` typé
+      (``rate_limited`` / ``transport_error`` / ``api_error``) depuis
+      le review fix I1 — aucune exception ne remonte dans l'async
+      generator.
 - [x] Tests d'intégration : `sirenisateur` + `recherche-entreprises`
       (pas `informations-entreprise`).
 
@@ -1051,60 +1063,81 @@ Budget : ~5 min, ~12 crédits Pappers. Rejouable si tu touches
 
 ### Check-list spécifique
 
-- [ ] **Sécurité** :
+- [x] **Sécurité** :
   - `wrap_user_input()` appelé sur **tous** les messages user texte
     (grep : aucun `append({"role": "user", "content": <str>})` qui
     n'est pas passé par `wrap_user_input` ou un `tool_result`).
   - Le system prompt contient bien la clause anti-injection (scan
-    `<user_input>` + clause de scope FR + refus PII).
+    `<user_input>` + clause de scope FR + refus PII + review fix I4 :
+    clause tool_result est donnée factuelle, pas instruction).
   - Pas d'`os.getenv` direct dans `agent.py` — passer par
     `settings.ANTHROPIC_API_KEY`.
   - Aucun log ne contient la clé Anthropic (pas de `logger.*(settings)`).
-- [ ] **Correctness boucle** :
+  - **Review fix I4** : `_neutralize_injection_attempts` scrubbe les
+    balises de frontière dans le contenu `tool_result` avant injection.
+- [x] **Correctness boucle** :
   - La boucle termine sur `end_turn` sans infinite loop.
-  - `MAX_ITERATIONS` filet testé (mock d'un tool_use perpétuel).
+  - `MAX_ITERATIONS` filet testé (`test_run_turn_respects_max_iterations`).
   - Tool_use → tool_result : pairing 1-pour-1, `tool_use_id` conservé.
   - Content array du message user de tool_result : **tool_result blocks
-    en premier**, pas de texte mixé.
-  - Assistant message ré-append au state avec `b.model_dump()` pour
-    être re-sérializable au prochain tour.
-- [ ] **Intégration S02** :
+    en premier**, pas de texte mixé (testé par
+    `test_tool_result_blocks_come_first_and_no_text_mixed`).
+  - Assistant message ré-append au state avec
+    `b.model_dump(exclude_none=True)` pour être re-sérializable au
+    prochain tour.
+  - **Review fix I2** : append atomique `assistant` + `user(tool_result)`
+    à la fin du cycle tool_use → intégrité state garantie sur break
+    mi-turn (testé par `test_break_midturn_preserves_state_integrity`).
+- [x] **Intégration S02** :
   - Usage effectif de `mcp_pappers.to_anthropic_schema`
     et `mcp_pappers.call_tool` (pas de duplication).
   - Catch spécifique `PappersError` (base) avant le fallback générique.
-- [ ] **Events yield** :
+- [x] **Events yield** :
   - Au moins un `llm_meta` par appel Claude.
-  - Un `end` en toute fin de turn (quelque soit la raison).
+  - Un `end` en toute fin de turn (quelque soit la raison — review fix
+    I1 étend aux erreurs API : `rate_limited`, `transport_error`,
+    `api_error`).
   - `tool_calls_count` cohérent entre state et event `end`.
-- [ ] **Isolation conversation** :
+- [x] **Isolation conversation** :
   - `ConversationState()` : `default_factory` utilisé (pas mutable
-    default).
+    default), testé explicitement.
   - Pas de singleton / global.
-- [ ] **Tests** :
+  - **Review fix I5** : lock `asyncio.Lock` per-instance sérialise les
+    `run_turn` concurrents sur la même session (testé par
+    `test_concurrent_run_turn_on_same_state_is_serialized`).
+- [x] **Tests** :
   - Unitaires passent sans clé API (100 % des tests S03 unit),
-    rapide et gratuit.
+    rapide et gratuit. **106/106 verts** après review fixes.
   - Intégration : marker ``integration`` **opt-in** (cf. ``pyproject.toml``
     ``addopts = "... -m 'not integration'"``) → ne tourne **pas** sous
-    ``make test``. Lance explicitement ``make test-integration`` si tu
-    veux les rejouer pour le review (budget : ~5 min, ~12 crédits
-    Pappers).
+    ``make test``. Double protection via
+    ``tests/integration/conftest.py`` qui applique automatiquement le
+    marker aux items de ce dossier (review fix A8).
   - Skip explicite si clés absentes (``SKIP = not (os.getenv(...))``).
-  - Aucun test ne mock la réponse Anthropic en "happy path" — les
-    tests d'intégration tapent l'API réelle (règle d'or README).
-- [ ] **Modèles** :
+  - **Plomberie boucle agentique** testée unit via fake
+    ``AsyncAnthropic`` scriptable dans ``test_S03_agent_loop.py``
+    (24 tests) — couvre tous les ``stop_reason``, erreurs API,
+    pairing tool_use/result, break mi-turn, concurrence session.
+    Règle d'or respectée : on ne mocke pas **l'intégration Pappers**
+    (couverte par S02 live), on fake **le SDK Anthropic** pour tester
+    la plomberie de ``run_turn`` à coût zéro.
+- [x] **Modèles** :
   - Constantes `MODEL_HAIKU` / `MODEL_SONNET` utilisées partout (pas
     de string dupliquée).
   - `model_id(tier)` est l'unique point de résolution.
-- [ ] **Robustesse Anthropic** :
-  - `RateLimitError` captée et convertie en event `end`.
-  - `APIConnectionError` / `APITimeoutError` laissées remonter
-    (documenté).
+- [x] **Robustesse Anthropic** (review fix I1) :
+  - `RateLimitError` → event ``end(reason="rate_limited")``.
+  - `APIConnectionError` / `APITimeoutError` → event
+    ``end(reason="transport_error")`` (avant : laissées remonter).
+  - `APIStatusError` (4xx hors 429, 5xx non-retryable) → event
+    ``end(reason="api_error")``.
   - Pas de retry custom : on fait confiance au SDK Anthropic
     (`max_retries=2` par défaut).
-- [ ] **Style** :
+- [x] **Style** :
   - `ruff check` / `ruff format --check` verts.
   - Pas de TODO/FIXME oubliés.
-  - Docstrings sur les publics (`run_turn`, `ConversationState`).
+  - Docstrings sur les publics (`run_turn`, `ConversationState`,
+    `_neutralize_injection_attempts`, `_truncate_tool_result`).
 
 ### Commit phase 3
 
@@ -1196,10 +1229,10 @@ Contrat d'events `end` élargi (à répercuter côté S06 / S07) :
 
 ## ✅ Critères d'acceptation
 
-- [ ] `test_fiche_lvmh_contains_siren` passe en live, SIREN
+- [x] `test_fiche_lvmh_contains_siren` passe en live (phase 2), SIREN
       `775670417` présent dans le texte final (normalisation digits
       only : Claude formate parfois `775 670 417`).
-- [ ] `test_multi_turn_pronoun_resolution_lvmh` passe en live :
+- [x] `test_multi_turn_pronoun_resolution_lvmh` passe en live :
       **critère ajusté phase 2** — on valide que le 2e tour cible
       LVMH (SIREN 775670417 ou nom "LVMH" dans les args d'un
       ``tool_use``) plutôt que d'asserter "arnault" dans le texte.
@@ -1207,22 +1240,26 @@ Contrat d'events `end` élargi (à répercuter côté S06 / S07) :
       retourne les commissaires aux comptes, pas la gouvernance
       opérationnelle (Arnault absent). Le test prouve la résolution
       du pronom "ses" → LVMH, pas la complétude de la base.
-- [ ] `test_refus_hors_scope_apple` passe : l'agent refuse et cadre
-      sur la France (pas d'hallucination Apple).
-- [ ] `test_end_event_emitted_with_tool_count` passe : event `end`
+- [x] `test_refus_hors_scope_apple` passe (phase 2 puis **renforcé
+      review fix A7** : assertion dure anti-hallucination de SIREN).
+- [x] `test_end_event_emitted_with_tool_count` passe : event `end`
       émis, `tool_calls_count` cohérent.
-- [ ] Streaming fonctionne : les chunks `text` arrivent **au fur et
+- [x] Streaming fonctionne : les chunks `text` arrivent **au fur et
       à mesure** (observable via un script de démo qui print `flush=True`).
-- [ ] `make test-unit` : tous les tests S01/S02/S03 verts.
-- [ ] `make lint` vert.
-- [ ] `gitleaks` clean.
+- [x] `make test-unit` : **106/106** tests S01/S02/S03 verts après
+      review fixes (70 avant + 24 boucle + 12 scrub/truncate/lock).
+- [x] `make lint` vert (ruff check + ruff format --check).
+- [x] `gitleaks` clean (pre-commit hook OK sur le commit review fix).
 
 ---
 
 ## 📦 Done when
 
-- [ ] Phase 1 commitée (`story(S03): refine — ...`) ← **cette story**.
-- [ ] Phase 2 commitée (`feat(S03): ...`) + tests verts.
-- [ ] Phase 3 approuvée (`review(S03): approved`).
+- [x] Phase 1 commitée (`story(S03): refine — ...`, `adad28d`).
+- [x] Phase 2 commitée (`feat(S03): ...`, `59e1905`) + tests verts.
+- [x] Phase 2 annexe (`chore(S03): marker-gate ...`, `21ec762`).
+- [x] Phase 3 fixes commit (`review(S03): fix — ...`, `79a1662`).
+- [x] Ligne S03 mise à jour dans `docs/stories/README.md` → ✅.
+- [ ] Push sur `claude/builder-evaluation-exercise-34Iyu`.
 - [ ] Ligne S03 mise à jour dans `docs/stories/README.md` → ✅.
 - [ ] Push sur `claude/builder-evaluation-exercise-34Iyu`.
