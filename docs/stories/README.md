@@ -148,11 +148,13 @@ opérationnelles.
       `ELEVENLABS_VOICE_GUILLAUME`, `ELEVENLABS_MODEL_ID`,
       `ENABLE_VOICE_BRIEF=false`, `LOG_LEVEL=INFO`) en place.
 
-### Avant S01 (fondation)
+### ✅ Avant S01 (fondation) — validé 2026-04-24
 
-- [ ] Python 3.11+ installé localement (`python --version`).
-- [ ] `uv` installé (`pip install uv` ou installeur officiel).
-- [ ] Docker installé (test image locale avant Railway).
+- [x] **Python 3.12.3** détecté (`/usr/bin/python3`). Choix figé : 3.12
+      (pas 3.13) — cf. décisions phase 1 dans `S01-scaffold.md`.
+- [x] **uv 0.10.6** détecté (`~/.local/bin/uv`). Dernière stable PyPI
+      `0.11.7` — pas de blocage, pin côté CI via `setup-uv@v8`.
+- [x] **Docker 27.4.0** détecté.
 
 ### Avant S08 (déploiement)
 
