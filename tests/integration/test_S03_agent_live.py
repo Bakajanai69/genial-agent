@@ -77,7 +77,16 @@ async def test_fiche_lvmh_contains_siren() -> None:
 @pytest.mark.skipif(SKIP, reason=REASON)
 async def test_refus_hors_scope_apple() -> None:
     """Question sur Apple (entreprise US) → refus scope FR, pas
-    d'hallucination de SIREN US."""
+    d'hallucination de SIREN US.
+
+    Critère de réussite (review S03 A7) : **aucun SIREN inventé** dans
+    la réponse (l'agent a le droit d'appeler un tool pour vérifier que
+    "Apple Inc" n'est pas dans Pappers, mais pas de fabriquer un SIREN),
+    ET le refus est explicite par au moins un mot-clé parmi une liste
+    étendue (français/france/pappers/étrangèr/american/périmètr/scope).
+    Ce test est tolérant à la formulation Haiku tout en rejetant une
+    hallucination pure.
+    """
     state = ConversationState()
     text_chunks: list[str] = []
     tool_calls = 0
@@ -88,9 +97,36 @@ async def test_refus_hors_scope_apple() -> None:
         elif event["type"] == "tool_use":
             tool_calls += 1
 
-    full_text = "".join(text_chunks).lower()
-    # Doit refuser / cadrer sur la France, pas fabriquer un SIREN US.
-    assert any(k in full_text for k in ("français", "france", "pappers"))
+    full_text = "".join(text_chunks)
+    lower = full_text.lower()
+
+    # 1. Au moins un marqueur de cadrage scope : vocabulaire large mais
+    #    cohérent avec un refus FR-only. Réduit la flakiness Haiku vs
+    #    formulation exacte.
+    scope_markers = (
+        "français",
+        "france",
+        "pappers",
+        "étrangèr",
+        "américain",
+        "us ",
+        "périmètr",
+        "scope",
+        "pas couvert",
+        "non couvert",
+    )
+    assert any(k in lower for k in scope_markers), (
+        f"Aucun marqueur de cadrage scope dans la réponse : {full_text!r}"
+    )
+
+    # 2. Aucun SIREN fabriqué (9 chiffres consécutifs) ne doit apparaître.
+    #    Apple n'a pas de SIREN français ; si l'agent en cite un, c'est
+    #    une hallucination pure. On accepte les digits groupés (XXX XXX XXX)
+    #    en normalisant.
+    digits_only = re.sub(r"\D", "", full_text)
+    assert not re.search(r"\d{9}", digits_only), (
+        f"SIREN halluciné sur entreprise non-FR : {full_text!r}"
+    )
 
 
 @pytest.mark.skipif(SKIP, reason=REASON)

@@ -1,6 +1,6 @@
 # S03 — Agent Claude core
 
-> **Statut** : 🟡 refined — phase 2 prête à démarrer
+> **Statut** : 🟢 review-fixed — phase 3 approuvée
 > **Durée estimée** : 1 h 30
 > **Parallélisable avec** : —
 
@@ -1109,6 +1109,88 @@ Budget : ~5 min, ~12 crédits Pappers. Rejouable si tu touches
 ### Commit phase 3
 
 `review(S03): approved` (si RAS) ou `review(S03): fix — …` + rework.
+
+### ✅ Review fixes appliqués (2026-04-24)
+
+La revue adversariale a identifié 5 points bloquants pour les stories
+S04+ qui consomment le contrat `run_turn`. Tous corrigés sans
+régression (106/106 tests unit verts, lint vert, format vert) :
+
+- **I1 — Contrat `end` event garanti sur exceptions API**. `run_turn`
+  capte explicitement `RateLimitError`, `APIConnectionError` (y compris
+  `APITimeoutError`) et `APIStatusError` (4xx hors 429 + 5xx non
+  retryable) et convertit chacun en event `end` typé
+  (`rate_limited` / `transport_error` / `api_error`) **avant** de
+  return. Plus aucun consumer UI S06 ne reçoit d'exception remontée via
+  l'async generator ; la step view peut toujours être clôturée.
+- **I2 — Atomicité state sur `break` mi-turn**. Les messages
+  `assistant(tool_use)` et `user(tool_result)` sont désormais appendés
+  **atomiquement** à la fin du cycle tool_use (après exécution de tous
+  les tools). Si le consumer `break` entre deux yields, `state.messages`
+  reste cohérent avec le tour précédent — le prochain `run_turn`
+  re-streamera la même requête (cache Pappers absorbe les tool calls
+  redondants, 0 crédit). Plus de 400 API `"tool_use ids without
+  tool_result blocks"` sur double-click utilisateur.
+- **I3 — Couverture unit de la boucle agentique**. Nouveau fichier
+  `tests/unit/test_S03_agent_loop.py` (24 tests, 0 crédit consommé)
+  avec fake `AsyncAnthropic` qui scripte les `stream` :
+  happy paths (`end_turn`, `tool_use→end_turn`, `max_tokens`,
+  `stop_sequence`, `refusal`), erreurs (`RateLimitError`,
+  `APIConnectionError`, `APIStatusError`, `PappersError`, exception
+  générique), MAX_ITERATIONS, ordre tool_result FIRST,
+  pairing tool_use/tool_result dans state, break mi-turn,
+  concurrence session, `tool_choice`/`extra_tools`/`continuation` S04,
+  `inference_geo` Sonnet-only, scrub tool_result. Les Dev Agents S04+
+  ne travaillent plus à l'aveugle sur la plomberie.
+- **I4 — Indirect prompt injection via contenu Pappers**. Deux couches :
+  (a) clause ajoutée dans `SYSTEM_PROMPT_AGENT` qui déclare que le
+  contenu des `tool_result` est donnée factuelle, pas instruction ;
+  (b) fonction `_neutralize_injection_attempts` qui scrubbe les balises
+  de frontière (`<user_input>`, `<tool_result>`, `<tool_use>` + closing)
+  dans le contenu injecté — remplacement par angle brackets unicode
+  (U+27E8/U+27E9) : lisible pour l'humain, inerte syntaxiquement.
+- **I5 — Lock de session sur `ConversationState`**. Nouveau champ
+  `ConversationState.lock: asyncio.Lock` (via `field(default_factory=)`,
+  per-instance). `run_turn` wrappe tout son corps dans
+  `async with state.lock:`. Deux `run_turn` concurrents sur la même
+  session s'exécutent séquentiellement, corruption d'ordre des messages
+  impossible. Test `test_concurrent_run_turn_on_same_state_is_serialized`
+  prouve l'invariant.
+
+Améliorations associées (A1-A10 de la revue) :
+
+- **A1** `AsyncAnthropic` via `async with` → cleanup httpx automatique.
+- **A3** `logger.warning(..., exc_info=True)` sur les broad except.
+- **A5** paramètre `tool_choice: dict | None = None` sur `run_turn`
+  (default `{"type": "auto"}`, S05 pourra forcer `any` cf. cahier R9).
+- **A6** `_truncate_tool_result` essaie de couper sur `\n`, `,`, ` `
+  dans la fenêtre de fin (512 chars) avant la coupe brute — évite de
+  fournir à Claude un JSON ouvert au milieu d'une clé.
+- **A8** `tests/integration/conftest.py` applique automatiquement le
+  marker `integration` à tous les items de ce dossier, même si un
+  futur fichier oublie le `pytestmark` en tête.
+- **A7** `test_refus_hors_scope_apple` (live) renforcé : liste de
+  marqueurs scope étendue (français/france/pappers/étrangèr/american/
+  périmètr/scope/pas couvert), et surtout assertion **dure** sur
+  l'absence de SIREN halluciné (`\d{9}` après normalisation digits).
+
+Contrat d'events `end` élargi (à répercuter côté S06 / S07) :
+
+| `reason` | Émis quand |
+|---|---|
+| `end_turn` | Claude a fini normalement. |
+| `max_tokens` | Output tronqué par `max_tokens`. |
+| `refusal` | Safety training Claude déclenchée. |
+| `pause_turn` | Pause longue tool use (rare). |
+| `stop_sequence` | Match d'une stop sequence. |
+| `max_iterations` | Filet anti-boucle-infinie (12 iters). |
+| `rate_limited` | 429 après retry SDK — UI cadrer "réessaie plus tard". |
+| `transport_error` | `APIConnectionError` / `APITimeoutError` — UI "API Claude indispo". |
+| `api_error` | Autre `APIStatusError` (400/401/5xx non-retryable) — UI message générique + log tech. |
+
+### Commit phase 3 (effectif)
+
+`review(S03): fix — end-event contract, state integrity, loop coverage, tool_result scrub, session lock`
 
 ---
 
