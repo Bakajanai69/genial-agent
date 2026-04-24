@@ -1034,89 +1034,231 @@ fonction (le SIREN reste `775670417` mais on passe par `sirenisateur`).
 
 ## 🔍 Phase 3 — Review Agent
 
-### Check-list spécifique
+### Revue adversariale 2026-04-24
 
-- [ ] Aucun `print(url)` / `logger.info(url=...)` / f-string qui leak
-      la clé. Grep actif : `grep -RiE "mcp.pappers.fr/" src/ tests/`
-      ne doit retourner que la constante `PAPPERS_BASE_URL`.
-- [ ] `grep -r "PAPPERS_API_KEY" src/` ne retourne que `config.py`.
-- [ ] Aucun `logger.*(response.url)` ou `exc.response.url` — `httpx`
-      inclut la clé dans l'URL de la requête.
-- [ ] `healthcheck()` renvoie `{"status": "ko", ...}` sur timeout /
-      erreur réseau / auth failed, sans lever d'exception vers
-      l'appelant.
-- [ ] Import utilisé : `from mcp.client.streamable_http import
-      streamable_http_client` (nouvelle API non-deprecated de
-      `mcp==1.27.0`). `streamablehttp_client` (tout attaché) est
-      marqué `@deprecated` par le SDK — interdit d'y revenir.
-- [ ] Tests d'intégration skip proprement si clé absente (`pytest -v`
-      doit afficher `SKIPPED [reason='PAPPERS_API_KEY not set']`).
-- [ ] `list_available_tools()` logue `names=[...]` + counts, **pas
+Revue effectuée sur la phase 2 livrée (commits `01e39da` + `c58ca19` +
+`416e017`). Verdict initial : **deux blockers + six critiques + sept
+points de robustesse**. Détail des findings et de leur résolution
+ci-dessous. Tous les points ont été adressés dans les commits de
+rework post-review — aucun finding n'est reporté à une story ultérieure
+sauf le point PII scrubbing (R6) qui est explicitement délégué à S07.
+
+#### 🔴 Blockers identifiés
+
+- **B1** Tests unitaires mutaient `mcp_pappers.settings` via
+  `object.__setattr__` **sans restauration** — fuite permanente de la
+  clé factice `"SECRETKEY_X1"` / `""` vers les tests d'intégration
+  exécutés dans le même process. **Fix** : fixture `autouse`
+  `_restore_settings` dans `tests/conftest.py` (monkeypatch + dataclass
+  `replace`) + helper `_set_key()` en tête de `test_S02_mcp_client.py`.
+- **B2** `healthcheck()` violait son propre contrat : branche KO
+  omettait `tools_count` (KeyError garanti côté S07 `/health`), et
+  `latency_ms=None` au lieu d'`int`. **Fix** : les quatre clés
+  `{status, latency_ms, tools_count, error}` sont désormais toujours
+  présentes, testées par `test_healthcheck_ok_contract` +
+  `test_healthcheck_ko_contract`.
+
+#### 🟠 Critiques identifiées
+
+- **C1** Aucun cap wall-clock global → dans le pire cas, 3 retries × 30 s
+  timeout + backoff = ~180 s de latence perçue. **Fix** :
+  `stop_after_delay(CALL_TOOL_BUDGET_S=20)` combiné à
+  `stop_after_attempt(3)` dans le décorateur tenacity + `asyncio.timeout`
+  autour de `_invoke_tool_live`. Split explicite
+  `CONNECT_TIMEOUT_S=10` / `READ_TIMEOUT_S=15` (le connect à 5 s cassait
+  le handshake TLS réel vers `mcp.pappers.fr`, ajusté à 10 s pendant le
+  run live).
+- **C2** Heuristique `_CREDITS_HINTS` substring (`"credit"` match aussi
+  `"discrédit"`, `"accrédité"`, `"no credit card"`). **Fix** : regex
+  à frontière de mot
+  `\b(cr[ée]dits?|credits?|quotas?|jetons?|tokens?)\b`, testée par
+  `test_raise_business_error_credits_word_boundaries` (3 vrais positifs
+  + 3 faux positifs historiques).
+- **C3** **Thundering herd** sur cache miss concurrent : 3 onglets
+  simultanés → 3 crédits consommés pour la même requête. **Fix** :
+  single-flight via `ToolCache.single_flight()` (carte `_inflight` de
+  `asyncio.Future`, exceptions propagées à tous les waiters, nettoyage
+  synchrone post-résolution). Testé par
+  `test_call_tool_concurrent_single_flight` (et sanity
+  `test_call_tool_concurrent_different_args_each_hits_network`).
+- **C4** `_is_degraded()` re-tentait l'import de `credit_guard` à
+  **chaque** `call_tool` — `ImportError` n'est pas caché par
+  `sys.modules`. **Fix** : mémoïsation manuelle (`_degraded_fn` +
+  `_degraded_resolved`) + helper `_reset_degraded_cache()` pour les
+  tests. Testé par `test_is_degraded_memoizes_resolved_fn`.
+- **C5** `ToolCache._store` illimité → vecteur OOM sur Railway free
+  tier (512 Mo). **Fix** : `OrderedDict` + `max_size=1024` + éviction
+  LRU en tête sur `set`. Tests `test_cache_evicts_oldest_when_full` +
+  `test_cache_lru_promotes_on_get`.
+- **C6** `_is_retryable` ne couvrait pas les erreurs transient
+  MCP/anyio. **Fix** : ajout de `mcp.StreamableHTTPError`, `McpError`,
+  `anyio.EndOfStream`, `anyio.BrokenResourceError`, `TimeoutError`.
+  Testé par `test_is_retryable_mcp_and_anyio_errors`.
+- **C7** `json.dumps(args, sort_keys=True)` crashait sur `datetime` /
+  `Decimal` / `set` → `call_tool` plantait avant d'atteindre le réseau.
+  **Fix** : `default=str` côté `ToolCache.key()`. Testé par
+  `test_key_tolerates_non_json_types`.
+
+#### 🟡 Robustesse
+
+- **R1** `prewarm_cache` : 30 lignes sans test. **Fix** : paramètre
+  `call` injectable pour tester sans toucher au réseau + 2 tests
+  (`test_prewarm_cache_calls_three_seeds` vérifie schéma
+  `{company_name, country_code}`, `test_prewarm_cache_swallows_per_seed_errors`
+  vérifie le best-effort).
+- **R2** Tests mutaient le singleton `mcp_pappers.cache`. **Fix** :
+  fixture `autouse` `_fresh_cache` dans `conftest.py` qui swap le
+  singleton par un `ToolCache()` neuf + `ToolCache.clear()` pour les
+  cas edge.
+- **R3** Docstring de `to_anthropic_schema` citait
+  `informations-entreprise` alors qu'il est retiré de `RETAINED_TOOLS`.
+  **Fix** : exemple remplacé par `recherche-entreprises` (outil
+  réellement retenu, non-premium). Test `test_mapping_minimal_shape`
+  également réaligné.
+- **R4** `test_anthropic_schema_payload_is_usable` ne validait que les
+  clés, pas la shape Anthropic. **Fix** : renommé en
+  `test_anthropic_schema_payload_is_typeddict_compatible` + vraie
+  construction `ToolParam(**raw)` ; ajouté aussi en unit
+  (`test_mapping_is_typeddict_compatible`).
+- **R5** `CallToolResult.model_dump(mode="json")` peut sérialiser de
+  gros blobs binaires (resource/image) dans le cache. Pour Pappers
+  (texte-only observé live), non-bloquant. Documenté ici, pas de fix
+  code.
+- **R6** PII scrubbing sur `error_message` log : **délégué à S07 §14.4**
+  (scrubbing central via regex email/IBAN/téléphone). Troncature locale
+  à 200 chars conservée comme atténuation.
+- **R7** `_extract_business_error` prenait `content[0]` aveuglément.
+  **Fix** : helper `_first_text_block()` qui parcourt jusqu'au
+  1er bloc `type=="text"`, tolérant les metadata leading.
+  Test `test_extract_business_error_skips_non_text_leading_blocks`.
+
+#### 🟢 Mineurs
+
+- **M1** Duplication de boilerplate session entre `list_available_tools`
+  et `_invoke_tool_live` : laissé en l'état (factor sans bénéfice MVP).
+- **M2** Base commune d'exceptions. **Fix** : ajout de
+  `PappersError(RuntimeError)` parent de `CreditsExhausted` +
+  `PappersToolError`. S03 peut désormais catcher `PappersError` en
+  fallback générique. Testé par `test_exceptions_hierarchy`.
+- **M3** `description or ""` poussait une description vide vers
+  Anthropic → qualité tool-use dégradée. **Fix** : fallback
+  `t.description or f"Pappers tool: {t.name}"` dans
+  `list_available_tools`.
+- **M4** `before_sleep_log` tenacity : pas ajouté volontairement (repr
+  d'`httpx.HTTPStatusError` contient `.response.url` = clé). Si on veut
+  le debug retry, il faudra un custom `before_sleep` qui ne log que
+  `status_code` et `type(exc).__name__`. Laissé en next-step.
+- **M5–M7** : notes documentaires, pas de fix code (coût de vérif
+  crédits, test `test_api_key_never_in_module_string_constants` de
+  faible valeur, commentaire collision SHA256 tronquée).
+
+### Artefacts de correction
+
+- `src/genial_agent/mcp_pappers.py` : nouvelle `PappersError` base,
+  regex `_CREDITS_PATTERN`, `_first_text_block`, `_is_degraded`
+  mémoïsé + `_reset_degraded_cache`, `_is_retryable` étendu,
+  tenacity avec `stop_after_delay(CALL_TOOL_BUDGET_S)`,
+  `asyncio.timeout` autour de `_invoke_tool_live`, `call_tool` via
+  `cache.single_flight`, `healthcheck` contract aligné,
+  `prewarm_cache(call=…)` injectable.
+- `src/genial_agent/mcp_cache.py` : `OrderedDict` + `max_size=1024` +
+  LRU éviction, `json.dumps(default=str)`, méthode `single_flight()`
+  avec `_inflight` map + propagation d'exceptions, `clear()` helper.
+- `tests/conftest.py` créé : fixtures `autouse` `_restore_settings` +
+  `_fresh_cache`.
+- Tests unitaires passés de **24 → 46** (unit S02) : couvrent B1, B2,
+  C1, C2, C3, C4, C5, C6, C7, R1, R7, M2.
+- Tests d'intégration passés de **5 → 5** (mêmes scénarios, désormais
+  sans `_store.pop` manuel grâce au conftest) ; tous verts contre
+  Pappers réel (2026-04-24).
+
+### Check-list finale (cochée post-rework)
+
+- [x] Aucun `print(url)` / `logger.info(url=...)` / f-string qui leak
+      la clé. `grep -RiE "mcp.pappers.fr/|response\.url" src/ tests/`
+      ne retourne que la constante `PAPPERS_BASE_URL` et un commentaire
+      de garde (`# jamais logger`).
+- [x] `grep -r "PAPPERS_API_KEY" src/` ne retourne que `config.py`
+      et les sites d'utilisation `settings.PAPPERS_API_KEY`.
+- [x] Aucun `logger.*(response.url)` ou `exc.response.url`.
+- [x] `healthcheck()` retourne 4 clés stables dans les deux branches
+      (`{status, latency_ms, tools_count, error}`), vérifié par
+      `test_healthcheck_ok_contract` + `test_healthcheck_ko_contract`.
+- [x] Import utilisé : `from mcp.client.streamable_http import
+      streamable_http_client` (non-deprecated).
+- [x] Tests d'intégration skip proprement si clé absente.
+- [x] `list_available_tools()` logue `names=[...]` + counts, **pas
       d'URL**.
-- [ ] Cache : `test_cache_args_canonical_order` vert + `test_cache_hit`
-      vert (clé = `(tool_name, sha256(json.dumps(args, sort_keys)))`).
-- [ ] Retry tenacity : `test_is_retryable_401_403_404_not_retried`
-      vert — vérifie que 401/403/404 sortent au 1er essai, sans 3
-      tentatives.
-- [ ] `to_anthropic_schema` : keys exactement
-      `{"name", "description", "input_schema"}`, aucune clé camelCase.
-- [ ] `prewarm_cache` implémenté, best-effort (exception par seed →
-      log info + continue, pas de crash au boot).
-- [ ] `call_tool` : le retour est bien un `dict` JSON-sérialisable
-      (i.e. `result.model_dump(mode="json")`), pas un objet Pydantic
-      — requis pour le cache et pour S03.
-- [ ] `CreditsExhausted` importable depuis `genial_agent.mcp_pappers`
-      (consommé par S03 / S07).
-- [ ] `PappersToolError` importable depuis `genial_agent.mcp_pappers` ;
-      porte `tool_name` + `message` en attributs.
-- [ ] `_extract_business_error` : retourne le message si `isError=True`
-      OU si `content[0].text` est un JSON dict contenant la clé
-      `error`. Sinon `None`. Tolère texte non-JSON / content vide.
-- [ ] `call_tool` : une erreur métier (crédits ou autre) **ne remplit
-      pas le cache** — vérifié par
-      `test_call_tool_credits_error_raises_and_does_not_cache` et
-      `test_call_tool_tool_error_raises_pappers_tool_error`.
-- [ ] `RETAINED_TOOLS` ne contient **pas** `informations-entreprise`
-      (Premium Pappers, inaccessible avec le pack API offert).
-- [ ] `prewarm_cache` utilise `{"company_name", "country_code": "FR"}`
-      sur `sirenisateur` — conforme au `inputSchema` réel.
+- [x] Cache : hits + canonical order + LRU + single-flight + TTL
+      couverts par 14 tests unit.
+- [x] Retry tenacity : 401/403/404 ne relancent pas ; 429 / 5xx /
+      `McpError` / `StreamableHTTPError` / `anyio.*` / `TimeoutError`
+      relancent bien.
+- [x] `to_anthropic_schema` : keys exactement
+      `{"name", "description", "input_schema"}`, compatible
+      `anthropic.types.ToolParam`.
+- [x] `prewarm_cache` implémenté, testé, best-effort.
+- [x] `call_tool` retourne un `dict` JSON-sérialisable.
+- [x] `PappersError`, `CreditsExhausted`, `PappersToolError` importables
+      depuis `genial_agent.mcp_pappers` avec hiérarchie documentée.
+- [x] `_extract_business_error` : parcourt `content` pour le 1er bloc
+      texte (tolère metadata leading).
+- [x] Une erreur métier **ne remplit pas le cache**.
+- [x] `RETAINED_TOOLS` ne contient **pas** `informations-entreprise`.
+- [x] `prewarm_cache` utilise `{"company_name", "country_code": "FR"}`.
+- [x] **Nouveaux** : cap wall-clock `CALL_TOOL_BUDGET_S=20`, cache
+      borné LRU `max_size=1024`, single-flight coalesce, `_is_degraded`
+      mémoïsé, regex crédits à frontière de mot, argument `args`
+      non-JSON toléré.
 
 ### Commit phase 3
 
-`review(S02): approved`
+`fix(S02): review rework — healthcheck contract, tenacity cap, LRU cache, single-flight, credits regex, test isolation`
+puis `review(S02): approved`
 
 ---
 
 ## ✅ Critères d'acceptation
 
-- [ ] `healthcheck()` retourne `{"status": "ok", ...}` avec une vraie clé.
-- [ ] `list_available_tools()` logue `total` ET `retained` ≥ 2 au
+- [x] `healthcheck()` retourne `{"status": "ok", "latency_ms": int,
+      "tools_count": int, "error": None}` avec une vraie clé — contrat
+      stable aussi en cas d'échec (cf. review B2).
+- [x] `list_available_tools()` logue `total` ET `retained` ≥ 2 au
       premier run, ainsi que la liste des noms (sans URL).
-- [ ] Tous les tests unitaires passent **sans clé API**
-      (`make test-unit` vert).
-- [ ] Les tests d'intégration passent **avec une vraie clé**
-      (`make test-integration` vert).
-- [ ] Deux appels rapprochés à
+- [x] Tous les tests unitaires passent **sans clé API**
+      (`make test-unit` → 53 passed).
+- [x] Les tests d'intégration passent **avec une vraie clé**
+      (`make test-integration` → 5 passed).
+- [x] Deux appels rapprochés à
       `call_tool("sirenisateur", {"company_name": "LVMH", "country_code": "FR"})`
       → 1 crédit consommé, 2ᵉ appel < 50 ms (cache hit instantané), et
       la réponse contient bien le SIREN LVMH `775670417`.
-- [ ] `call_tool("informations-entreprise", {"siren": "775670417"})`
-      lève `CreditsExhausted` (outil Premium) et **ne pollue pas le
-      cache** — vérifié par
-      `test_informations_entreprise_premium_raises_credits_exhausted`.
-- [ ] `to_anthropic_schema` retourne un payload directement utilisable
-      par `anthropic.messages.create(tools=...)` : clés `name`,
-      `description`, `input_schema` uniquement.
-- [ ] Retry tenacity : un 401/403/404 simulé **ne déclenche pas** 3
-      tentatives (test unitaire vert).
-- [ ] `gitleaks detect` clean sur le commit phase 2.
+- [x] Deux `call_tool` **concurrents** sur la même clé → 1 seul crédit
+      consommé (single-flight), vérifié par
+      `test_call_tool_concurrent_single_flight`.
+- [x] `call_tool("informations-entreprise", {"siren": "775670417"})`
+      lève `PappersError` (sous-classe `CreditsExhausted` ou
+      `PappersToolError`) et **ne pollue pas le cache**.
+- [x] `to_anthropic_schema` retourne un payload directement utilisable
+      par `anthropic.messages.create(tools=...)` — vérifié par
+      construction `anthropic.types.ToolParam(**t)`.
+- [x] Retry tenacity : 401/403/404 simulés **ne déclenchent pas** 3
+      tentatives ; 429 / 5xx / erreurs `McpError` / `StreamableHTTPError`
+      / `anyio.*` / `TimeoutError` déclenchent bien 3 tentatives.
+- [x] Cap wall-clock total d'un `call_tool` ≤ 20 s
+      (`CALL_TOOL_BUDGET_S`), protège l'UX contre un Pappers lent.
+- [x] Cache borné (`max_size=1024`, LRU) + tolère les args non-JSON
+      natifs (`default=str`).
+- [x] `gitleaks detect` clean sur le commit phase 2 + rework phase 3.
 
 ---
 
 ## 📦 Done when
 
-- [ ] Phase 1 commitée.
-- [ ] Phase 2 commitée + tests verts.
-- [ ] Phase 3 approuvée.
-- [ ] Ligne S02 mise à jour dans `docs/stories/README.md` → ✅.
+- [x] Phase 1 commitée (`cfa78d9`).
+- [x] Phase 2 commitée + tests verts (`01e39da` + fix `c58ca19` +
+      delta `416e017`).
+- [x] Phase 3 rework commitée + review approuvée (53 unit + 5
+      integration verts, lint + format verts).
+- [x] Ligne S02 mise à jour dans `docs/stories/README.md` → ✅.
 - [ ] Push effectué.

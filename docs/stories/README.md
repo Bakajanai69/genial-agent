@@ -186,7 +186,7 @@ opérationnelles.
 | # | Story | Statut | Dépend de | Parallèle avec |
 |---|---|---|---|---|
 | S01 | [Scaffold repo](./S01-scaffold.md) | ✅ approved | — | — |
-| S02 | [Client MCP Pappers](./S02-mcp-pappers.md) | 🟡 dev done | S01 | — |
+| S02 | [Client MCP Pappers](./S02-mcp-pappers.md) | ✅ approved | S01 | — |
 | S03 | [Agent Claude core](./S03-agent-core.md) | ⬜ à faire | S02 | — |
 | S04 | [Routing Haiku↔Sonnet](./S04-routing.md) | ⬜ à faire | S03 | — |
 | S05 | [Garde-fous 6 couches](./S05-guardrails.md) | ⬜ à faire | S03 | S06 |
