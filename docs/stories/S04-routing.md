@@ -302,7 +302,18 @@ légitimes.
 
 Solution : normalisation NFKD → drop des combining marks → lowercase,
 avant match regex. Ça décompose `é` en `e + ́` puis strippe le
-diacritique. Bonus : harmonise aussi `œ` → `oe`, `ç` → `c`.
+diacritique. Côté `ç`, la cédille est un combining mark → stripée, `ç`
+→ `c`.
+
+**Limites connues — ligatures non-décomposables par NFKD** :
+`œ` (U+0153), `æ` (U+00E6), `ß` (U+00DF) ne sont **pas** décomposés
+par NFKD. Le `encode("ascii", "ignore")` les **drop purement** au lieu
+de les transcrire (`œ` → ``, pas `oe` ; `ß` → ``, pas `ss`). Conséquence
+acceptée pour le MVP : pas de pattern route keyword n'en dépend, et
+le vocabulaire "Cœur Défense" / "Straße" est rare dans les requêtes
+entreprises FR. Si besoin futur (marketing multi-pays, etc.), passer
+à une table de transcription explicite via `str.maketrans`. Verrouillé
+en test par `test_normalize_fr_drops_non_nfkd_ligatures`.
 
 ```python
 import unicodedata
@@ -383,9 +394,22 @@ S04 forwarde tous les events de `run_turn` **tels quels** + ajoute :
 | `type` | Champs | Émis quand |
 |---|---|---|
 | `routing_initial` | `tier: "haiku" \| "sonnet"`, `reason: "keyword" \| "default"` | Une fois, au tout début de `run_routed_turn`. |
-| `escalation` | `reason: str`, `mode: "self" \| "forced"` | Haiku appelle `escalate_to_sonnet` (self) ou cap `tool_calls_per_turn` / `wall_clock` atteint en Haiku (forced). `reason` inclut la cause exacte (`cap_tool_calls_per_turn=5`, `cap_wall_clock=15s`, ou texte libre pour self). |
-| `capped` | `reason: "tool_calls_per_turn" \| "wall_clock"`, `count: int \| None` | Cap atteint en tier Sonnet déjà (pas d'escalade possible, pas de tier au-dessus MVP). |
-| `routing_done` | `model_used: "haiku" \| "sonnet"`, `escalated: bool`, `escalation_mode: "self" \| "forced" \| None`, `escalation_reason: str \| None`, `tool_calls_count: int` | Une fois, en toute fin. |
+| `escalation` | `reason_code: str`, `reason: str`, `mode: "self" \| "forced"` | Haiku appelle `escalate_to_sonnet` (self) ou cap atteint en Haiku (forced). Voir "Reason codes" ci-dessous. |
+| `capped` | `reason_code: str`, `reason: str`, `count: int` | Cap atteint en tier Sonnet déjà (pas d'escalade possible, pas de tier au-dessus MVP). Même `reason_code` que côté escalation — format unifié. |
+| `routing_done` | `model_used: "haiku" \| "sonnet"`, `escalated: bool`, `escalation_mode: "self" \| "forced" \| None`, `escalation_reason_code: str \| None`, `escalation_reason: str \| None`, `capped: bool`, `capped_reason_code: str \| None`, `capped_reason: str \| None`, `tool_calls_count: int` | Une fois, en toute fin. Propage la cause du cap (que ce soit via escalation ou capped) pour les consumers qui n'observent que l'event final (S07). |
+
+**Reason codes** (enum stable, exposés en constantes Python dans
+`routing.py`) :
+
+| `reason_code` | Détail humain (`reason`) | Émis sur |
+|---|---|---|
+| `"self"` | Texte libre de Haiku, tronqué à 200 chars | Escalation self (Haiku a appelé le tool) |
+| `"cap_tool_calls_per_turn"` | `"N/MAX tool calls"` | Cap `MAX_TOOL_CALLS_PER_TURN` atteint |
+| `"cap_wall_clock"` | `"Ns"` (budget total) | Cap `WALL_CLOCK_S` atteint |
+
+**Contrat d'usage** : les consumers (S06 badge UI, S07 stats) matchent
+sur `reason_code` (stable, enum) et affichent `reason` (humain, peut
+évoluer). Interdit de substring-matcher sur `reason` côté code.
 
 Les events S03 conservés (`text`, `tool_use`, `tool_result`, `llm_meta`,
 `end`) sont **forwardés**. S04 n'altère aucun d'eux.
@@ -1499,8 +1523,17 @@ puis, si tests passent :
 - [ ] **`extra_tools=[ESCALATE_TOOL_SCHEMA]`** uniquement quand tier
       initial = Haiku. Sonnet initial → pas d'escalate injecté.
 - [ ] **Event contract complet** : `routing_initial`, `routing_done`
-      toujours émis ; `escalation` avec `mode: self|forced` si escalade ;
-      `capped` si cap sur Sonnet.
+      toujours émis ; `escalation` avec `mode: self|forced` et
+      `reason_code` enum si escalade ; `capped` avec `reason_code` enum
+      si cap sur Sonnet ; `routing_done` propage `capped_reason_code`
+      et `capped_reason` pour S07.
+- [ ] **Reason codes stables** : `REASON_CODE_SELF`,
+      `REASON_CODE_CAP_TOOL_CALLS`, `REASON_CODE_CAP_WALL_CLOCK` exposés
+      en constantes Python. Aucun substring match sur `reason` dans les
+      tests (uniquement sur `reason_code`).
+- [ ] **Self-escalate reason tronquée** à `_SELF_REASON_MAX_CHARS=200`
+      pour défense en profondeur contre une reason Haiku anormalement
+      longue (prompt injection indirecte).
 - [ ] **Pas de log du `user_message`** ni de PII potentielle.
 - [ ] **Pas d'import de `guardrails/caps`** en dur — fallback via
       try/except ImportError en attendant S05.
@@ -1532,15 +1565,30 @@ puis, si tests passent :
       `WALL_CLOCK_S=0` monkeypatch, escalation `mode=forced`,
       `reason` contient `cap_wall_clock`.
 - [x] Test `test_capped_on_sonnet_no_further_escalation` (unit fake)
-      passe : event `capped` émis, pas d'escalation.
+      passe : event `capped` émis avec `reason_code=cap_tool_calls_per_turn`,
+      `routing_done.capped_reason_code` propagé, pas d'escalation.
 - [x] Test `test_wall_clock_triggers_capped_on_sonnet` (unit fake)
-      passe : Sonnet initial + wall-clock hit → `capped`, pas
-      d'escalation, `routing_done.capped=True`.
+      passe : Sonnet initial + wall-clock hit → `capped` avec
+      `reason_code=cap_wall_clock`, pas d'escalation,
+      `routing_done.capped=True` + `routing_done.capped_reason_code`
+      propagé.
 - [x] Test `test_wall_clock_wait_for_timeout_path` (unit) passe :
       couvre le chemin `except TimeoutError` (fake stream qui bloque
-      plus que `WALL_CLOCK_S`).
+      plus que `WALL_CLOCK_S`), matche sur `reason_code` (pas substring).
 - [x] Test `test_state_lock_released_after_self_escalate` (unit)
       passe — pas de deadlock.
+- [x] Test `test_simple_query_routing_done_exposes_full_contract`
+      (unit) passe : tous les champs du contrat présents dans
+      `routing_done` même sur chemin sans escalation/capped (défense
+      KeyError côté consumer).
+- [x] Test `test_self_escalate_reason_is_capped` (unit) passe : reason
+      Haiku de 5 000 chars tronquée à ≤ 200 chars dans l'event
+      `escalation`.
+- [x] Test `test_concurrent_routed_turn_serialized` (unit) passe :
+      2 `run_routed_turn` concurrents sur le même state sont sérialisés
+      par `state.lock`, ordre messages cohérent.
+- [x] Test `test_normalize_fr_drops_non_nfkd_ligatures` (unit) passe :
+      verrouille le comportement `œ`/`æ`/`ß` → drop par NFKD+ascii.
 - [ ] Tests live `test_simple_stays_haiku_live` et
       `test_complex_keyword_goes_sonnet_live` passent (quand
       `make test-integration` lancé avec les clés). *(opt-in, non

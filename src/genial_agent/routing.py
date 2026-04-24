@@ -18,6 +18,22 @@ Implémentation wall-clock : itération manuelle avec
 ``asyncio.wait_for(gen.__anext__(), timeout=remaining)`` pour respecter
 PEP 789 (pas de ``asyncio.timeout`` autour d'un ``yield`` dans un async
 generator). Cf. S04 phase 1 §"Décision majeure".
+
+**Contrat de "reason"** — pour que S06 (UI badge) et S07 (stats) puissent
+agréger sans dépendre d'un substring match fragile, chaque event porteur
+d'une cause (escalation, capped) expose deux champs disjoints :
+
+- ``reason_code`` (str, enum stable) : ``"self"``,
+  ``"cap_tool_calls_per_turn"`` ou ``"cap_wall_clock"``. **Utiliser ce
+  champ pour toute logique code-to-code** (matching, agrégation stats).
+- ``reason`` (str, détail humain) : ``"5/5 tool calls"``, ``"15.0s"``,
+  ou le texte libre que Haiku a fourni via ``escalate_to_sonnet.input
+  .reason``. Ce champ est **à afficher** en UI mais **pas à matcher**
+  programmatiquement.
+
+``routing_done`` réexpose ces deux champs (préfixés ``escalation_*``
+ou ``capped_*``) pour qu'un consumer qui n'observe que l'event final
+ait la cause disponible.
 """
 
 from __future__ import annotations
@@ -104,6 +120,24 @@ def pick_initial_tier(user_message: str) -> ModelTier:
 
 
 # ---------------------------------------------------------------------------
+# Reason codes (enum stable pour matching code-to-code)
+# ---------------------------------------------------------------------------
+
+# Valeurs possibles du champ ``reason_code`` dans les events ``escalation``
+# et ``capped``. Utiliser ces constantes depuis les consumers (S06/S07)
+# plutôt qu'un substring match sur ``reason`` (humain, peut évoluer).
+REASON_CODE_SELF = "self"
+REASON_CODE_CAP_TOOL_CALLS = "cap_tool_calls_per_turn"
+REASON_CODE_CAP_WALL_CLOCK = "cap_wall_clock"
+
+# Cap de longueur sur le ``reason`` text libre fourni par Haiku via
+# ``escalate_to_sonnet.input.reason``. Défense en profondeur contre
+# l'indirect prompt injection : même si Haiku est convaincu de forger
+# une raison longue / formatée, l'UI n'affiche qu'un extrait.
+_SELF_REASON_MAX_CHARS = 200
+
+
+# ---------------------------------------------------------------------------
 # Tool méta escalate_to_sonnet
 # ---------------------------------------------------------------------------
 
@@ -180,23 +214,40 @@ async def run_routed_turn(
     initial_count = state.tool_calls_count
     deadline = time.monotonic() + WALL_CLOCK_S
     escalated = False
+    escalation_reason_code: str | None = None
     escalation_reason: str | None = None
     escalation_mode: str | None = None
     capped_in_sonnet = False  # set si cap atteint alors qu'on est déjà Sonnet
+    capped_reason_code: str | None = None
+    capped_reason: str | None = None
+
+    def _per_turn() -> int:
+        return state.tool_calls_count - initial_count
 
     def _hit_cap_tool_calls() -> bool:
-        return (state.tool_calls_count - initial_count) >= MAX_TOOL_CALLS_PER_TURN
+        return _per_turn() >= MAX_TOOL_CALLS_PER_TURN
 
-    def _emit_cap_hit(cap_reason: str) -> dict[str, Any]:
-        """Fabrique l'event à émettre quand un cap est atteint, selon le
-        tier courant. Ne met PAS à jour les flags — c'est fait par
-        l'appelant."""
+    def _emit_cap_hit(reason_code: str, reason_detail: str) -> dict[str, Any]:
+        """Fabrique l'event à émettre quand un cap backend est atteint,
+        selon le tier courant. Ne met **pas** à jour les flags d'état —
+        c'est à l'appelant de le faire en regardant ``initial_tier``.
+
+        Format unifié pour les deux events :
+        - ``reason_code`` : enum stable à matcher (``==``) côté consumer.
+        - ``reason`` : détail humain à afficher, **pas** à matcher.
+        """
         if initial_tier == ModelTier.HAIKU:
-            return {"type": "escalation", "reason": cap_reason, "mode": "forced"}
+            return {
+                "type": "escalation",
+                "reason_code": reason_code,
+                "reason": reason_detail,
+                "mode": "forced",
+            }
         return {
             "type": "capped",
-            "reason": cap_reason,
-            "count": state.tool_calls_count - initial_count,
+            "reason_code": reason_code,
+            "reason": reason_detail,
+            "count": _per_turn(),
         }
 
     # Haiku reçoit le tool escalate_to_sonnet en plus des Pappers.
@@ -215,19 +266,17 @@ async def run_routed_turn(
             # --- Wall-clock cap (cahier §5.3) ---
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                # Format unifié `cap_wall_clock={s}s` que ce soit pour
-                # escalation (Haiku) ou capped (Sonnet) : le test
-                # ``test_wall_clock_triggers_capped_on_sonnet`` vérifie
-                # que la reason contient ``cap_wall_clock`` même en
-                # tier Sonnet (substring match).
-                cap_reason = f"cap_wall_clock={WALL_CLOCK_S}s"
+                reason_detail = f"{WALL_CLOCK_S}s"
                 logger.warning("routing_cap_wall_clock", seconds=WALL_CLOCK_S)
-                yield _emit_cap_hit(cap_reason)
+                yield _emit_cap_hit(REASON_CODE_CAP_WALL_CLOCK, reason_detail)
                 if initial_tier == ModelTier.HAIKU:
-                    escalation_reason = cap_reason
+                    escalation_reason_code = REASON_CODE_CAP_WALL_CLOCK
+                    escalation_reason = reason_detail
                     escalation_mode = "forced"
                     escalated = True
                 else:
+                    capped_reason_code = REASON_CODE_CAP_WALL_CLOCK
+                    capped_reason = reason_detail
                     capped_in_sonnet = True
                 break
 
@@ -238,15 +287,18 @@ async def run_routed_turn(
                 break
             except TimeoutError:
                 # Un single await dans run_turn a dépassé `remaining`.
-                # Même traitement que wall-clock cap hit.
-                cap_reason = f"cap_wall_clock={WALL_CLOCK_S}s"
+                # Même traitement que wall-clock cap hit (même reason_code).
+                reason_detail = f"{WALL_CLOCK_S}s"
                 logger.warning("routing_cap_wall_clock_wait_for", seconds=WALL_CLOCK_S)
-                yield _emit_cap_hit(cap_reason)
+                yield _emit_cap_hit(REASON_CODE_CAP_WALL_CLOCK, reason_detail)
                 if initial_tier == ModelTier.HAIKU:
-                    escalation_reason = cap_reason
+                    escalation_reason_code = REASON_CODE_CAP_WALL_CLOCK
+                    escalation_reason = reason_detail
                     escalation_mode = "forced"
                     escalated = True
                 else:
+                    capped_reason_code = REASON_CODE_CAP_WALL_CLOCK
+                    capped_reason = reason_detail
                     capped_in_sonnet = True
                 break
 
@@ -254,13 +306,19 @@ async def run_routed_turn(
             # "tool" escalate_to_sonnet via mcp_pappers (MCP ne le
             # connaît pas, ça partirait en PappersError / 404). ---
             if event.get("type") == "tool_use" and event.get("name") == ESCALATE_TOOL_NAME:
-                escalation_reason = event.get("input", {}).get("reason") or "unspecified"
+                raw_reason = event.get("input", {}).get("reason") or "unspecified"
+                # Cap de longueur — défense contre une reason anormalement
+                # longue (prompt injection indirecte ou bug Haiku).
+                reason_detail = str(raw_reason)[:_SELF_REASON_MAX_CHARS]
+                escalation_reason_code = REASON_CODE_SELF
+                escalation_reason = reason_detail
                 escalation_mode = "self"
                 escalated = True
-                logger.info("routing_escalate_self", reason=escalation_reason)
+                logger.info("routing_escalate_self", reason_length=len(reason_detail))
                 yield {
                     "type": "escalation",
-                    "reason": escalation_reason,
+                    "reason_code": REASON_CODE_SELF,
+                    "reason": reason_detail,
                     "mode": "self",
                 }
                 break
@@ -269,19 +327,18 @@ async def run_routed_turn(
 
             # --- Cap tool calls par-turn ---
             if _hit_cap_tool_calls():
-                per_turn = state.tool_calls_count - initial_count
-                cap_reason = (
-                    f"cap_tool_calls_per_turn={per_turn}"
-                    if initial_tier == ModelTier.HAIKU
-                    else "tool_calls_per_turn"
-                )
+                per_turn = _per_turn()
+                reason_detail = f"{per_turn}/{MAX_TOOL_CALLS_PER_TURN} tool calls"
                 logger.warning("routing_cap_tool_calls", per_turn_count=per_turn)
-                yield _emit_cap_hit(cap_reason)
+                yield _emit_cap_hit(REASON_CODE_CAP_TOOL_CALLS, reason_detail)
                 if initial_tier == ModelTier.HAIKU:
-                    escalation_reason = cap_reason
+                    escalation_reason_code = REASON_CODE_CAP_TOOL_CALLS
+                    escalation_reason = reason_detail
                     escalation_mode = "forced"
                     escalated = True
                 else:
+                    capped_reason_code = REASON_CODE_CAP_TOOL_CALLS
+                    capped_reason = reason_detail
                     capped_in_sonnet = True
                 break
     finally:
@@ -309,16 +366,31 @@ async def run_routed_turn(
         ):
             yield event
 
+    model_used = (
+        ModelTier.SONNET.value
+        if escalated or initial_tier == ModelTier.SONNET
+        else ModelTier.HAIKU.value
+    )
+    tool_calls_per_turn = state.tool_calls_count - initial_count
+    logger.info(
+        "routing_done",
+        model_used=model_used,
+        escalated=escalated,
+        escalation_mode=escalation_mode,
+        escalation_reason_code=escalation_reason_code,
+        capped=capped_in_sonnet,
+        capped_reason_code=capped_reason_code,
+        tool_calls_count=tool_calls_per_turn,
+    )
     yield {
         "type": "routing_done",
-        "model_used": (
-            ModelTier.SONNET.value
-            if escalated or initial_tier == ModelTier.SONNET
-            else ModelTier.HAIKU.value
-        ),
+        "model_used": model_used,
         "escalated": escalated,
         "escalation_mode": escalation_mode,
+        "escalation_reason_code": escalation_reason_code,
         "escalation_reason": escalation_reason,
         "capped": capped_in_sonnet,
-        "tool_calls_count": state.tool_calls_count - initial_count,
+        "capped_reason_code": capped_reason_code,
+        "capped_reason": capped_reason,
+        "tool_calls_count": tool_calls_per_turn,
     }
