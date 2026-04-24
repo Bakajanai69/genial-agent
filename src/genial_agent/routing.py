@@ -48,24 +48,15 @@ from typing import Any
 import structlog
 
 from genial_agent.agent import ConversationState, run_turn
+
+# Caps S04 — single source of truth dans ``guardrails/caps.py`` (S05).
+# Cahier §5.3, §14.3 C4, README "Décisions de cohérence". Avant S05, un
+# ``try/except ImportError`` fallback local vivait ici — retiré à la
+# merge S05 (la story S05 fige ces constantes).
+from genial_agent.guardrails.caps import MAX_TOOL_CALLS_PER_TURN, WALL_CLOCK_S
 from genial_agent.models import ModelTier
 
 logger = structlog.get_logger(__name__)
-
-# ---------------------------------------------------------------------------
-# Caps S04 (à migrer vers guardrails/caps.py en S05)
-# ---------------------------------------------------------------------------
-
-# Caps par-turn (cahier §5.3, §14.3 C4, README "Décisions de cohérence").
-# TODO(S05): déplacer vers guardrails/caps.py et importer d'ici.
-try:
-    from genial_agent.guardrails.caps import (  # type: ignore[import-not-found]
-        MAX_TOOL_CALLS_PER_TURN,
-        WALL_CLOCK_S,
-    )
-except ImportError:  # S05 pas encore mergée
-    MAX_TOOL_CALLS_PER_TURN = 5
-    WALL_CLOCK_S = 15
 
 
 # ---------------------------------------------------------------------------
