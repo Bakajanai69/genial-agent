@@ -718,11 +718,14 @@ settings = Settings()
   avec `.response.status_code` pour 401/403/429/5xx. 404 est parfois
   intercepté côté SDK pour le cas « session HTTP expirée », ne pas
   l'interpréter comme « entité inconnue ».
-- **Erreurs métier tool** : Pappers n'utilise pas le status HTTP pour
-  signaler « SIREN introuvable » → réponse 200 OK avec
-  `CallToolResult(isError=True, content=[TextContent(text="...")])`.
-  À catcher séparément (`payload["isError"]`) dans le code appelant
-  (S03).
+- **Erreurs métier tool (réalité terrain)** : Pappers renvoie parfois
+  HTTP 200 + `isError=False` **mais** encode l'erreur dans un JSON
+  textuel (`content[0].text = '{"error": "..."}'`), notamment sur les
+  outils Premium refusés pour crédits insuffisants. Le flag MCP
+  standard `isError=True` est utilisé pour d'autres cas (validation
+  Zod d'arguments par ex.). Le code S02 gère les **deux** via
+  `_extract_business_error` → lève `CreditsExhausted` (hint *crédits*)
+  ou `PappersToolError`, sans jamais cacher.
 - **Retry tenacity** : predicate `_is_retryable` ne retry **que** sur
   429 / 5xx / `httpx.TransportError` / `httpx.TimeoutException`. 401,
   403, 404 passent immédiatement en échec, sans 3 tentatives.
@@ -988,6 +991,44 @@ PAPPERS_API_KEY=xxx make test-integration
 ### Commit phase 2
 
 `feat(S02): Pappers MCP client with cache 24h, tenacity retry, anthropic schema mapping`
+puis fix de suivi :
+`fix(S02): detect Pappers business errors, drop premium tool, correct prewarm args`
+
+### 🧭 Deltas phase 2 vs refine (2026-04-24)
+
+Notes honnêtes sur les écarts constatés pendant l'implémentation — la
+refine s'est appuyée sur l'introspection du SDK mais pas sur un call
+réel d'outil. Les deltas ci-dessous sont figés dans le code livré.
+
+1. **Import SDK** : `streamablehttp_client` (tout attaché) est en
+   réalité **le symbole deprecated** dans `mcp==1.27.0` (message SDK :
+   *"Use `streamable_http_client` instead."*). La refine décrivait
+   l'inverse. Livré : on utilise `streamable_http_client` (avec
+   underscore) + un `httpx.AsyncClient` custom construit via
+   `create_mcp_http_client(timeout=...)` pour préserver le timeout 30 s.
+2. **`informations-entreprise` retiré de `RETAINED_TOOLS`** : probe
+   live montre que c'est un **outil Premium Pappers** qui renvoie
+   systématiquement `{"error": "Vous n'avez pas de crédits suffisants..."}`
+   avec le pack API 100 crédits offert. Hors scope MVP tant qu'un pack
+   supérieur n'est pas souscrit. U1/U3 retissés autour de
+   `sirenisateur` + `recherche-entreprises` + `comptes-entreprise`.
+3. **Erreurs métier Pappers pas portées par `isError`** : Pappers
+   renvoie HTTP 200 + `isError=False` et encode les erreurs dans du
+   **texte JSON** (`content[0].text = '{"error": "..."}'`). Nouveau
+   helper `_extract_business_error` + deux exceptions distinctes :
+   `CreditsExhausted` (hint *crédit(s)*) et `PappersToolError` (le
+   reste). Les deux sont levées **sans** passer par le cache.
+4. **`prewarm_cache` : args corrigés** — `sirenisateur` requiert
+   `company_name` + `country_code` (validé contre le `inputSchema`
+   réel), pas `query`. Le second appel à `informations-entreprise` est
+   supprimé puisque l'outil est Premium.
+5. **Tests** : passés de 3 → 5 en intégration (ajout du cas Premium
+   + vraie vérification du SIREN LVMH dans le payload retourné) ;
+   passés de ~13 → 24 en unit (ajout du pack `_extract_business_error`
+   + erreur métier ne pollue pas le cache).
+
+Point d'acceptation §"Deux appels rapprochés" reformulé ci-dessous en
+fonction (le SIREN reste `775670417` mais on passe par `sirenisateur`).
 
 ---
 
@@ -1005,8 +1046,9 @@ PAPPERS_API_KEY=xxx make test-integration
       erreur réseau / auth failed, sans lever d'exception vers
       l'appelant.
 - [ ] Import utilisé : `from mcp.client.streamable_http import
-      streamablehttp_client` (pas l'alias `streamable_http_client`
-      `@deprecated`).
+      streamable_http_client` (nouvelle API non-deprecated de
+      `mcp==1.27.0`). `streamablehttp_client` (tout attaché) est
+      marqué `@deprecated` par le SDK — interdit d'y revenir.
 - [ ] Tests d'intégration skip proprement si clé absente (`pytest -v`
       doit afficher `SKIPPED [reason='PAPPERS_API_KEY not set']`).
 - [ ] `list_available_tools()` logue `names=[...]` + counts, **pas
@@ -1025,6 +1067,19 @@ PAPPERS_API_KEY=xxx make test-integration
       — requis pour le cache et pour S03.
 - [ ] `CreditsExhausted` importable depuis `genial_agent.mcp_pappers`
       (consommé par S03 / S07).
+- [ ] `PappersToolError` importable depuis `genial_agent.mcp_pappers` ;
+      porte `tool_name` + `message` en attributs.
+- [ ] `_extract_business_error` : retourne le message si `isError=True`
+      OU si `content[0].text` est un JSON dict contenant la clé
+      `error`. Sinon `None`. Tolère texte non-JSON / content vide.
+- [ ] `call_tool` : une erreur métier (crédits ou autre) **ne remplit
+      pas le cache** — vérifié par
+      `test_call_tool_credits_error_raises_and_does_not_cache` et
+      `test_call_tool_tool_error_raises_pappers_tool_error`.
+- [ ] `RETAINED_TOOLS` ne contient **pas** `informations-entreprise`
+      (Premium Pappers, inaccessible avec le pack API offert).
+- [ ] `prewarm_cache` utilise `{"company_name", "country_code": "FR"}`
+      sur `sirenisateur` — conforme au `inputSchema` réel.
 
 ### Commit phase 3
 
@@ -1042,8 +1097,13 @@ PAPPERS_API_KEY=xxx make test-integration
 - [ ] Les tests d'intégration passent **avec une vraie clé**
       (`make test-integration` vert).
 - [ ] Deux appels rapprochés à
-      `call_tool("informations-entreprise", {"siren": "775670417"})`
-      → 1 crédit consommé, 2ᵉ appel < 50 ms (cache hit instantané).
+      `call_tool("sirenisateur", {"company_name": "LVMH", "country_code": "FR"})`
+      → 1 crédit consommé, 2ᵉ appel < 50 ms (cache hit instantané), et
+      la réponse contient bien le SIREN LVMH `775670417`.
+- [ ] `call_tool("informations-entreprise", {"siren": "775670417"})`
+      lève `CreditsExhausted` (outil Premium) et **ne pollue pas le
+      cache** — vérifié par
+      `test_informations_entreprise_premium_raises_credits_exhausted`.
 - [ ] `to_anthropic_schema` retourne un payload directement utilisable
       par `anthropic.messages.create(tools=...)` : clés `name`,
       `description`, `input_schema` uniquement.
