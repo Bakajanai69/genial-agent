@@ -1518,34 +1518,35 @@ puis, si tests passent :
 
 ## ✅ Critères d'acceptation
 
-- [ ] `pick_initial_tier` passe tous les cas paramétrés (accents,
+- [x] `pick_initial_tier` passe tous les cas paramétrés (accents,
       majuscules, word boundaries, multi-SIREN).
-- [ ] Test `test_simple_query_stays_haiku` (unit fake) passe.
-- [ ] Test `test_complex_keyword_goes_sonnet_direct` (unit fake) passe.
-- [ ] Test `test_haiku_self_escalates_to_sonnet` (unit fake) passe :
+- [x] Test `test_simple_query_stays_haiku` (unit fake) passe.
+- [x] Test `test_complex_keyword_goes_sonnet_direct` (unit fake) passe.
+- [x] Test `test_haiku_self_escalates_to_sonnet` (unit fake) passe :
       2 appels stream, events escalation+routing_done cohérents.
-- [ ] Test `test_haiku_self_escalate_tool_never_called_on_mcp` (unit)
+- [x] Test `test_haiku_self_escalate_tool_never_called_on_mcp` (unit)
       passe — pas d'appel `mcp_pappers.call_tool` sur
       `escalate_to_sonnet`.
-- [ ] Test `test_forced_escalation_on_tool_cap` (unit fake) passe.
-- [ ] Test `test_forced_escalation_on_wall_clock` (unit fake) passe :
+- [x] Test `test_forced_escalation_on_tool_cap` (unit fake) passe.
+- [x] Test `test_forced_escalation_on_wall_clock` (unit fake) passe :
       `WALL_CLOCK_S=0` monkeypatch, escalation `mode=forced`,
       `reason` contient `cap_wall_clock`.
-- [ ] Test `test_capped_on_sonnet_no_further_escalation` (unit fake)
+- [x] Test `test_capped_on_sonnet_no_further_escalation` (unit fake)
       passe : event `capped` émis, pas d'escalation.
-- [ ] Test `test_wall_clock_triggers_capped_on_sonnet` (unit fake)
+- [x] Test `test_wall_clock_triggers_capped_on_sonnet` (unit fake)
       passe : Sonnet initial + wall-clock hit → `capped`, pas
       d'escalation, `routing_done.capped=True`.
-- [ ] Test `test_wall_clock_wait_for_timeout_path` (unit) passe :
+- [x] Test `test_wall_clock_wait_for_timeout_path` (unit) passe :
       couvre le chemin `except TimeoutError` (fake stream qui bloque
       plus que `WALL_CLOCK_S`).
-- [ ] Test `test_state_lock_released_after_self_escalate` (unit)
+- [x] Test `test_state_lock_released_after_self_escalate` (unit)
       passe — pas de deadlock.
 - [ ] Tests live `test_simple_stays_haiku_live` et
       `test_complex_keyword_goes_sonnet_live` passent (quand
-      `make test-integration` lancé avec les clés).
-- [ ] `make lint` vert, `make test` (= test-unit) vert.
-- [ ] `gitleaks detect` clean sur le commit phase 2.
+      `make test-integration` lancé avec les clés). *(opt-in, non
+      rejoué par Dev Agent cf. README "Décisions de cohérence")*
+- [x] `make lint` vert, `make test` (= test-unit) vert.
+- [x] `gitleaks detect` clean sur le commit phase 2.
 
 ---
 
