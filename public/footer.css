@@ -1,0 +1,19 @@
+/* Footer permanent RGPD — cf. cahier §16.4. Charge via
+   .chainlit/config.toml [UI] custom_css = "/public/footer.css".
+
+   Fragile : le sélecteur ``#chat-container`` dépend du build Chainlit
+   2.11.x. À revalider sur tout bump majeur (Web Inspector ou DOM tree).
+   Si le sélecteur change, fallback testé : ``[data-testid="chat"]``
+   sur ``.MuiBox-root``. Documenté en S09 README "next step : footer
+   via cl.Element side-pane". */
+#chat-container::after {
+    content: "Données via Pappers · Modèles Claude (Anthropic) · Messages traités en US (Anthropic) et FR (Pappers). Pas de stockage permanent.";
+    display: block;
+    text-align: center;
+    font-size: 0.75rem;
+    color: var(--muted-foreground, #999);
+    padding: 0.5rem 1rem;
+    border-top: 1px solid var(--border, #2a2a2a);
+    background: var(--background, transparent);
+    flex-shrink: 0;
+}

@@ -25,8 +25,15 @@ build/
 htmlcov/
 .cache/
 
-# Chainlit
-.chainlit/
+# Chainlit — on gitignore les artefacts générés mais on garde
+# .chainlit/config.toml versionné (S06 customizations : footer CSS,
+# locale FR, app name) pour que Railway applique les mêmes settings
+# que le local. NB: ``.chainlit/`` ne peut pas être ignoré globalement
+# avec un ``!`` de réinclusion, car gitignore n'autorise pas la
+# réinclusion d'un fichier dont le parent est exclu — on liste donc
+# les sous-paths un par un.
+.chainlit/translations/
+.chainlit/.session_files/
 .files/
 chainlit.md.bak
 
