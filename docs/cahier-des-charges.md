@@ -203,6 +203,22 @@ dur est le filet ultime. Overhead ~0 ms sur le chemin court.
 - Cache applicatif : clé = `(tool_name, args_hash)`, TTL 24 h, couvre les
   3 entreprises des tests officiels (LVMH, BNP, Carrefour) pour protéger
   les crédits en dev.
+- **Gestion des payloads volumineux** : le dogfooding S09 (cf.
+  [`docs/inspection-mcp-vs-agent.md`](./inspection-mcp-vs-agent.md))
+  a révélé que 3 outils Pappers sur 5 testables (`comptes-entreprise`,
+  `recherche-dirigeants`, `cartographie-entreprise`) retournent
+  systématiquement des payloads largement supérieurs à la borne agent
+  ``_TOOL_RESULT_MAX_CHARS=16_000`` (jusqu'à 706 K chars sur Carrefour
+  Hyper). La troncature actuelle (coupe par caractères avec délimiteur
+  propre) fait perdre les bilans récents et tronque les listes de
+  mandats — cf. story dédiée
+  [`docs/stories/S09.5-mcp-payload-handling.md`](./stories/S09.5-mcp-payload-handling.md)
+  pour le choix d'approche (programmatic tool calling Anthropic,
+  filesystem offload Deep Agents, sub-agent synthesizer, wrapper
+  déterministe per-tool, ou hybride). L'agent **a conscience** de la
+  troncature et le signale plutôt que d'inventer — la robustesse
+  comportementale est intacte, c'est la **complétude** des réponses
+  qui doit être améliorée.
 
 ### 5.5 Système de prompt
 
