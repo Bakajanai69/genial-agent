@@ -25,7 +25,15 @@ def _today() -> str:
 class Stats:
     started_at_iso: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     started_at_monotonic: float = field(default_factory=time.monotonic)
+    # Tour utilisateur servi : 1 message reçu et engagé dans le pipeline
+    # (hors cache hit idempotence, hors message vide). Incrémenté par
+    # ``app.py:on_message`` — **jamais** par le pipeline (cf. review B1).
     total_turns: int = 0
+    # Appel LLM Anthropic effectif : 1 par event ``llm_meta`` reçu par le
+    # pipeline (1 turn utilisateur peut générer N appels selon la chaîne
+    # de tool calls + escalade éventuelle). Incrémenté par
+    # ``pipeline.py``.
+    total_llm_calls: int = 0
     total_tool_calls: int = 0
     pappers_calls_today: int = 0
     pappers_calls_today_day: str = field(default_factory=_today)
@@ -40,6 +48,7 @@ _stats = Stats()
 _INCR_FIELDS = frozenset(
     {
         "total_turns",
+        "total_llm_calls",
         "total_tool_calls",
         "pappers_calls_today",
         "anthropic_input_tokens",
@@ -78,6 +87,7 @@ def snapshot() -> dict[str, int | str]:
         "started_at": _stats.started_at_iso,
         "uptime_s": int(time.monotonic() - _stats.started_at_monotonic),
         "total_turns": _stats.total_turns,
+        "total_llm_calls": _stats.total_llm_calls,
         "total_tool_calls": _stats.total_tool_calls,
         "pappers_calls_today": _stats.pappers_calls_today,
         "pappers_calls_today_day": _stats.pappers_calls_today_day,

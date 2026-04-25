@@ -37,8 +37,11 @@ def configure_logging() -> None:
        scrubbé en aval.
     2. ``add_log_level`` — ajoute le champ ``level``.
     3. ``TimeStamper(fmt="iso", utc=True)`` — horodatage ISO 8601 UTC.
-    4. ``pii_scrub_processor`` — S05 (email / téléphone FR / IBAN / NIR).
-    5. ``dict_tracebacks`` — exceptions structurées en JSON pour Railway.
+    4. ``dict_tracebacks`` — exceptions structurées en JSON pour Railway.
+       **Placé avant** ``pii_scrub_processor`` (post-review B2) pour que
+       le scrub voie aussi les frames / locals de la stacktrace.
+    5. ``pii_scrub_processor`` — S05 (email / téléphone FR / IBAN / NIR).
+       Récursif sur dict / list / tuple depuis review B2.
     6. ``EventRenamer(to="msg")`` — Railway / Datadog cherchent ``msg``.
     7. ``JSONRenderer`` — sortie ligne par ligne JSON valide.
     """
@@ -71,8 +74,8 @@ def configure_logging() -> None:
             structlog.contextvars.merge_contextvars,
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso", utc=True),
-            pii_scrub_processor,
             structlog.processors.dict_tracebacks,
+            pii_scrub_processor,
             structlog.processors.EventRenamer(to="msg"),
             structlog.processors.JSONRenderer(),
         ],

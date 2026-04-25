@@ -148,15 +148,18 @@ async def run_guarded_turn(
                 in_tok = int(event.get("input_tokens") or 0)
                 out_tok = int(event.get("output_tokens") or 0)
                 await budget.add(session_id, in_tok, out_tok)
-                # S07 — instrumentation centrale. Le pipeline est le seul
-                # endroit qui voit tous les ``llm_meta`` (Haiku initial +
-                # Sonnet en cas d'escalade) ; instrumenter dans
-                # ``agent.run_turn`` doublerait les compteurs. Le bind
-                # contextvar du ``request_id`` scope les logs Anthropic
-                # par appel ; chaque appel écrase le précédent (souhaité,
-                # le ``request_id`` est par-appel pas par-turn).
+                # S07 (B1 fix) — ``llm_meta`` est émis **par appel
+                # Claude** (chaque itération de ``agent.run_turn``, plus
+                # une 2ᵉ série en cas d'escalade Haiku→Sonnet). Le
+                # pipeline incrémente donc ``total_llm_calls`` (compteur
+                # bas niveau, utile au debug latence/coût) ; le compteur
+                # ``total_turns`` (1 par tour utilisateur) est porté par
+                # ``app.py:on_message`` qui voit lui le périmètre
+                # message-utilisateur. Bind contextvar du ``request_id``
+                # par-appel : chaque ``bind_contextvars`` écrase le
+                # précédent, c'est attendu (request_id par-appel).
                 stats_incr(
-                    total_turns=1,
+                    total_llm_calls=1,
                     anthropic_input_tokens=in_tok,
                     anthropic_output_tokens=out_tok,
                 )

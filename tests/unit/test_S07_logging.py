@@ -105,3 +105,47 @@ def test_httpx_info_logger_is_silenced() -> None:
 
     assert _logging.getLogger("httpx").getEffectiveLevel() >= _logging.WARNING
     assert _logging.getLogger("httpcore").getEffectiveLevel() >= _logging.WARNING
+
+
+# ---------------------------------------------------------------------------
+# Régressions B2 (review S07) — scrub PII récursif + ordre des processors
+# ---------------------------------------------------------------------------
+
+
+def test_pii_scrubbed_in_nested_dict(capsys: pytest.CaptureFixture[str]) -> None:
+    """Régression B2 : un PII niché dans un ``dict`` (kwarg de log) doit
+    être scrubbé. La version pré-fix laissait fuiter."""
+    structlog.get_logger().info(
+        "evt",
+        details={"contact_email": "leak@example.com", "nested": {"phone": "06 12 34 56 78"}},
+    )
+    line = _last_json_line(capsys)
+    assert "leak@example.com" not in str(line)
+    assert "06 12 34 56 78" not in str(line)
+    assert line["details"]["contact_email"] == "[EMAIL]"
+    assert line["details"]["nested"]["phone"] == "[PHONE_FR]"
+
+
+def test_pii_scrubbed_in_list_of_strings(capsys: pytest.CaptureFixture[str]) -> None:
+    """Régression B2 : les ``list`` sont parcourues récursivement."""
+    structlog.get_logger().info("evt", contacts=["a@b.c", "06 12 34 56 78", "neutral"])
+    line = _last_json_line(capsys)
+    assert line["contacts"] == ["[EMAIL]", "[PHONE_FR]", "neutral"]
+
+
+def test_pii_scrubbed_in_exception_traceback(capsys: pytest.CaptureFixture[str]) -> None:
+    """Régression B2 : ``dict_tracebacks`` est placé **avant** le scrub
+    pour que les messages d'exception soient aussi scrubbés.
+
+    On lève une exception dont le message contient un email/IBAN puis
+    on log avec ``exc_info=True`` (pattern réel d'``agent.py``)."""
+    try:
+        raise RuntimeError("contact via leak@example.com or FR76 1234 5678 9012 3456 7890 123")
+    except RuntimeError:
+        structlog.get_logger().error("agent_api_status_error", exc_info=True)
+    line = _last_json_line(capsys)
+    serialized = str(line)
+    assert "leak@example.com" not in serialized
+    assert "FR76 1234 5678 9012 3456 7890 123" not in serialized
+    # Et au moins l'un des placeholders est présent dans la stacktrace.
+    assert "[EMAIL]" in serialized or "[IBAN_FR]" in serialized

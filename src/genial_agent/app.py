@@ -36,6 +36,9 @@ from genial_agent.observability import (
     mount_routes,
 )
 from genial_agent.observability import (
+    incr as stats_incr,
+)
+from genial_agent.observability import (
     remaining as credits_remaining,
 )
 from genial_agent.ui.entity_tracker import (
@@ -118,6 +121,11 @@ async def on_chat_start() -> None:
     """
     cl.user_session.set("state", ConversationState())
     cl.user_session.set("entity_banner_msg", None)
+    # Flag de dédup du bandeau crédits bas (review M2). Reset à chaque
+    # ouverture de chat pour qu'une nouvelle session puisse re-voir
+    # l'avertissement même si l'utilisateur a déjà été notifié dans une
+    # session précédente.
+    cl.user_session.set("credits_low_banner_shown", False)
 
     # Healthcheck Pappers borné dur (cf. ``_HEALTHCHECK_TIMEOUT_S``).
     # ``mcp_pappers.healthcheck`` retourne déjà ``status="ko"`` sur
@@ -188,16 +196,30 @@ async def on_message(message: cl.Message) -> None:
             ).send()
             return
 
+        # 1bis. Compteur tour utilisateur (review B1) — incrémenté UNE
+        # fois par message effectivement engagé dans le pipeline. Cache
+        # hit idempotence (return ci-dessus) n'est pas compté car aucun
+        # crédit / appel LLM n'est consommé.
+        stats_incr(total_turns=1)
+
         # 2. Bandeau crédits bas (cahier §16.3 R16) — non-bloquant.
+        # Affiché **une seule fois par session** (review M2) : sinon
+        # l'utilisateur reçoit le bandeau à chaque message une fois le
+        # seuil franchi, bruit visuel pour rien.
         rem = credits_remaining()
-        if rem < _CREDITS_LOW_THRESHOLD:
+        already_warned = bool(cl.user_session.get("credits_low_banner_shown"))
+        if rem < _CREDITS_LOW_THRESHOLD and not already_warned:
             logger.warning("ui_credits_low_banner", remaining=rem)
+            cl.user_session.set("credits_low_banner_shown", True)
+            # Wording corrigé (review M1) : la zone "bas" est un
+            # **avertissement**, le mode cache-only effectif ne
+            # s'enclenche qu'à ``remaining == 0`` via ``credit_guard.degraded()``.
             await cl.Message(
                 content=(
-                    f"⚠ **Budget Pappers dégradé** — il reste {rem} appels "
-                    f"sur {DAILY_PAPPERS_CREDITS_CAP} aujourd'hui. "
-                    f"Mode cache-only sur les entités connues "
-                    f"(LVMH, BNP, Carrefour)."
+                    f"⚠ **Budget Pappers bas** — il reste {rem} appels sur "
+                    f"{DAILY_PAPPERS_CREDITS_CAP} aujourd'hui. Au-delà, "
+                    f"l'agent basculera en mode cache-only sur les entités "
+                    f"connues (LVMH, BNP, Carrefour)."
                 ),
                 author="Système",
                 type="system_message",

@@ -150,3 +150,107 @@ def test_stats_reflects_increments(
     assert body["total_turns"] == 3
     assert body["total_tool_calls"] == 12
     assert body["pappers_calls_today"] == 12
+
+
+# ---------------------------------------------------------------------------
+# Régressions B3 / M3 / M4 / N3 (review S07)
+# ---------------------------------------------------------------------------
+
+
+def test_stats_token_uses_hmac_compare_digest() -> None:
+    """Régression B3 : la comparaison du token doit être timing-safe.
+
+    On valide par inspection de la source pour ne pas dépendre de
+    l'observation de timing différentiel (bruité par l'OS scheduler).
+    Garde-fou contre une régression silencieuse vers ``==``.
+    """
+    import inspect
+
+    from genial_agent.observability import routes as routes_mod
+
+    src = inspect.getsource(routes_mod)
+    assert "hmac.compare_digest" in src, (
+        "routes.py doit utiliser hmac.compare_digest pour comparer le STATS_TOKEN (cf. review B3)"
+    )
+
+
+def test_health_supports_head_method(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Régression N3 : UptimeRobot peut faire HEAD pour économiser
+    la bande passante. Sans ``HEAD`` dans ``methods``, Starlette
+    répond 405.
+    """
+
+    async def fake_health() -> dict[str, object]:
+        return {"status": "ok", "latency_ms": 5, "tools_count": 1, "error": None}
+
+    monkeypatch.setattr("genial_agent.mcp_pappers.healthcheck", fake_health)
+    r = client.head("/health")
+    assert r.status_code == 200, f"HEAD /health doit répondre 200, pas {r.status_code}"
+
+
+def test_health_times_out_when_mcp_hangs(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Régression M3 : un MCP coincé ne doit pas tenir UptimeRobot
+    ouvert 15 s (timeout réseau de ``mcp_pappers``). On force un
+    healthcheck infiniment lent et on vérifie que la route répond
+    rapidement avec ``status="ko"`` cohérent."""
+    import asyncio
+    import time
+
+    from genial_agent.observability import routes as routes_mod
+
+    # Timeout court pour le test.
+    monkeypatch.setattr(routes_mod, "_HEALTH_MCP_TIMEOUT_S", 0.05)
+
+    async def hanging_health() -> dict[str, object]:
+        await asyncio.sleep(2.0)  # bien plus que le timeout
+        return {"status": "ok", "latency_ms": 0, "tools_count": 0, "error": None}
+
+    monkeypatch.setattr("genial_agent.mcp_pappers.healthcheck", hanging_health)
+
+    started = time.monotonic()
+    r = client.get("/health")
+    elapsed = time.monotonic() - started
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "ko"
+    assert body["mcp"]["error"] == "TimeoutError"
+    # Marge généreuse pour ne pas flaker selon la charge CI.
+    assert elapsed < 1.0, (
+        f"/health a mis {elapsed:.2f}s alors que le timeout est 0.05s → régression M3"
+    )
+
+
+def test_mount_routes_purges_duplicates_on_remount() -> None:
+    """Régression M4 : un cycle ``reset_for_tests`` + ``mount_routes``
+    ne doit PAS accumuler de doublons dans ``cl_app.router.routes``.
+    """
+    from chainlit.server import app as cl_app
+    from starlette.routing import Route as _Route
+
+    from genial_agent.observability.mount import (
+        mount_routes,
+        reset_for_tests,
+    )
+
+    # Plusieurs cycles de remount.
+    for _ in range(5):
+        reset_for_tests()
+        mount_routes()
+
+    health_routes = [
+        r for r in cl_app.router.routes if isinstance(r, _Route) and r.path == "/health"
+    ]
+    stats_routes = [r for r in cl_app.router.routes if isinstance(r, _Route) and r.path == "/stats"]
+    assert len(health_routes) == 1, (
+        f"Accumulation détectée : {len(health_routes)} routes /health (régression M4)"
+    )
+    assert len(stats_routes) == 1, (
+        f"Accumulation détectée : {len(stats_routes)} routes /stats (régression M4)"
+    )

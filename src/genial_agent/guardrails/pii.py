@@ -55,6 +55,30 @@ def scrub(text: str) -> str:
     return result
 
 
+def _scrub_value(value: Any) -> Any:
+    """Scrub récursif : str scrubbé directement, dict / list / tuple
+    descendus, autres types retournés tels quels.
+
+    Couvre les valeurs imbriquées (``logger.info("evt", details={"email":
+    "x@y.z"})``) **et** les structures produites par
+    ``dict_tracebacks`` (liste de dicts représentant les frames d'une
+    exception, qui peuvent transporter des PII via
+    ``locals`` / message d'exception).
+
+    Résolu post-review S07 (B2) : la version précédente ne scrubbait
+    que les ``str`` de premier niveau, laissant fuiter tout PII niché.
+    """
+    if isinstance(value, str):
+        return scrub(value)
+    if isinstance(value, dict):
+        return {k: _scrub_value(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_scrub_value(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_scrub_value(v) for v in value)
+    return value
+
+
 # ---------------------------------------------------------------------------
 # Structlog processor — branché côté S07
 # ---------------------------------------------------------------------------
@@ -65,25 +89,17 @@ def pii_scrub_processor(
     name: str,  # noqa: ARG001
     event_dict: dict[str, Any],
 ) -> dict[str, Any]:
-    """Processor ``structlog`` : scrub tous les champs ``str`` du event_dict.
+    """Processor ``structlog`` : scrub récursivement tous les ``str`` du
+    event_dict, y compris ceux nichés dans des ``dict`` / ``list`` /
+    ``tuple``.
 
-    À ajouter à la chaîne de processors (S07) **avant** ``JSONRenderer``
-    pour garantir qu'aucun log émis ne contient de PII.
-
-    Usage (S07) ::
-
-        structlog.configure(
-            processors=[
-                structlog.processors.TimeStamper(fmt="iso"),
-                pii_scrub_processor,
-                structlog.processors.JSONRenderer(),
-            ],
-        )
+    À placer dans la chaîne **après** ``dict_tracebacks`` (qui
+    transforme ``exc_info`` en liste de dicts avec frames + locals)
+    pour que le scrub voie aussi les contenus d'exception.
 
     Signature respecte le contrat structlog processor :
     ``(logger, method_name, event_dict) -> event_dict``.
     """
     for key, value in list(event_dict.items()):
-        if isinstance(value, str):
-            event_dict[key] = scrub(value)
+        event_dict[key] = _scrub_value(value)
     return event_dict

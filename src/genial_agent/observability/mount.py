@@ -8,6 +8,13 @@ statique natif Chainlit.
 
 Idempotent via ``_MOUNTED`` — appeler plusieurs fois est sans effet
 (utile dans les tests qui partagent ``chainlit.server.app``).
+
+**Override propre du /health natif** (review M4) : on **retire**
+explicitement les routes existantes ``/health`` et ``/stats`` (que
+ce soit le ``/health`` statique de Chainlit ou un mount précédent
+d'un test) avant de prepend nos versions. Cela évite l'accumulation
+de routes au fil des resets et garantit qu'aucun handler natif ne
+court-circuite le nôtre, même après un upgrade Chainlit.
 """
 
 from __future__ import annotations
@@ -17,16 +24,31 @@ from starlette.routing import Route
 from genial_agent.observability.routes import health, stats
 
 _MOUNTED = False
+_OWNED_PATHS = ("/health", "/stats")
+
+
+def _purge_existing_routes(routes: list) -> None:
+    """Retire les ``Route`` Starlette dont le ``path`` est dans
+    ``_OWNED_PATHS``. Mute la liste en place (``cl_app.router.routes``
+    est cette même liste — ré-assigner ferait perdre le binding du
+    router FastAPI).
+    """
+    indices_to_remove = [
+        i
+        for i, r in enumerate(routes)
+        if isinstance(r, Route) and getattr(r, "path", None) in _OWNED_PATHS
+    ]
+    # Suppression en ordre décroissant pour ne pas invalider les indices.
+    for i in reversed(indices_to_remove):
+        del routes[i]
 
 
 def mount_routes() -> None:
     """Prepend ``/health`` (override Chainlit statique) et ``/stats``.
 
-    Note : l'override volontaire du ``/health`` natif Chainlit nous
-    permet de retourner un payload riche (ping MCP, version, uptime)
-    plutôt que ``{"status": "ok"}`` statique. Un upgrade futur de
-    Chainlit (3.x) qui retire ce ``/health`` natif n'aura aucun
-    impact sur notre handler — il continuera à matcher en premier.
+    Méthodes acceptées : ``GET`` + ``HEAD`` (review N3). UptimeRobot
+    et certains health-probes utilisent ``HEAD`` (économie bande
+    passante) ; sans ``HEAD``, Starlette renvoie 405.
     """
     global _MOUNTED
     if _MOUNTED:
@@ -37,18 +59,19 @@ def mount_routes() -> None:
     # pas charger chainlit.
     from chainlit.server import app as cl_app
 
-    cl_app.router.routes.insert(0, Route("/health", health, methods=["GET"]))
-    cl_app.router.routes.insert(1, Route("/stats", stats, methods=["GET"]))
+    routes = cl_app.router.routes
+    _purge_existing_routes(routes)
+    routes.insert(0, Route("/health", health, methods=["GET", "HEAD"]))
+    routes.insert(1, Route("/stats", stats, methods=["GET", "HEAD"]))
     _MOUNTED = True
 
 
 def reset_for_tests() -> None:
     """Force un re-mount au prochain ``mount_routes`` — tests only.
 
-    Ne désinstalle pas les routes déjà prepend-ées (Starlette ne le
-    permet pas proprement) : c'est OK car les tests successifs voient
-    juste deux paires de routes ``/health`` + ``/stats`` toutes deux
-    prioritaires sur le catch-all, dont la 1ère matche.
+    Le prochain ``mount_routes()`` purgera lui-même les routes
+    précédentes (cf. ``_purge_existing_routes``), donc on ne risque
+    pas l'accumulation cross-test.
     """
     global _MOUNTED
     _MOUNTED = False

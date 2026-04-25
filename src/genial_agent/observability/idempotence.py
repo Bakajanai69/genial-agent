@@ -41,7 +41,12 @@ class IdempotenceCache:
 
     @staticmethod
     def key(session_id: str, message: str) -> str:
-        h = hashlib.sha256(message.encode("utf-8", errors="replace")).hexdigest()[:16]
+        # SHA-256 complet (64 hex chars). La version pré-review tronquait
+        # à 16 hex (= 64 bits → birthday collision à ~2^32 messages dans
+        # une même session) ; pas un risque pratique avec ``MAX_ENTRIES =
+        # 256`` mais le hex complet coûte 0 et supprime l'ambiguïté
+        # (cf. review N1).
+        h = hashlib.sha256(message.encode("utf-8", errors="replace")).hexdigest()
         return f"{session_id}:{h}"
 
     async def get(self, session_id: str, message: str) -> str | None:
