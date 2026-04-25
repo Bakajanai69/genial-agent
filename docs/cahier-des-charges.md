@@ -169,7 +169,7 @@ Mauvais trade-off latence.
    (ex : après 2 tool calls il voit qu'il en faut 5+ de plus).
    Sonnet reprend avec le contexte complet (tool results déjà obtenus).
 
-3. **Cap dur backend** — **7** tool calls ou **30 s** wall-clock sans
+3. **Cap dur backend** — **7** tool calls ou **60 s** wall-clock sans
    conclusion → escalade forcée côté code. Filet de sécurité au cas où
    Haiku sur-estime ses capacités (métacognition LLM imparfaite).
    - **Tool calls** révisé de 5 à 7 après smoke test U3 sur l'URL
@@ -177,12 +177,14 @@ Mauvais trade-off latence.
      pour U3 (2 ``sirenisateur`` + 2 ``comptes-entreprise``) ; un cap
      à 5 ne tolérait aucune inefficacité (ex : doublon SIREN). 7 garde
      la philosophie cap dur tout en laissant une marge réaliste.
-   - **Wall-clock** révisé de 15 s à 30 s (review S08 §B1bis, post
-     smoke webapp prod) : 15 s coupait Sonnet en plein streaming sur
-     la synthèse finale U3 (~25 K tokens de bilans à comparer), alors
-     qu'il avait déjà fait 4 tool calls valides en parallèle. 30 s
-     reste bounded (un agent réellement stuck ne pondrait pas
-     4 tool_use en 15 s) tout en couvrant l'UX produit légitime.
+   - **Wall-clock** révisé en deux itérations 15 → 30 → 60 s
+     (review S08 §B1bis). 30 s flapait encore en webapp prod parce
+     que **Anthropic prompt caching n'est pas activé** côté
+     ``agent.py``, ce qui fait exploser le TTFT du 3ème round U3
+     (contexte cumulé ~50-60 K tokens : 2 entités × 3 ans de bilans).
+     60 s couvre le worst case mesuré. Vrai fix produit
+     (prompt caching) listé en next-step S09 — il couperait le TTFT
+     5-10× et permettrait de revenir à 30 s.
 
 L'UI affiche quel modèle a servi la réponse finale
 (badge `⚡ Haiku` ou `🧠 Sonnet`), y compris en cas d'escalade
@@ -484,7 +486,7 @@ enterprise** avec les bons patterns dès le jour 1.
 | C1 | **Input gate** — length cap 2000 chars, regex anti-injection, wrapping `<user_input>…</user_input>` | Code, 0 LLM | 30 min | ✅ |
 | C2 | **System prompt durci** — scope strict FR+Pappers, clause anti-injection, liste de refus (conseil, PII, invention) | Prompt | 20 min | ✅ |
 | C3 | **Safety native Claude** — refus embarqué dans le modèle | Gratuite | 0 | ✅ |
-| C4 | **Execution caps** — 7 tool calls max, 30 s wall-clock max, budget tokens plafonné par session (80 K) | Code, 0 LLM | 20 min | ✅ |
+| C4 | **Execution caps** — 7 tool calls max, 60 s wall-clock max, budget tokens plafonné par session (80 K) | Code, 0 LLM | 20 min | ✅ |
 | C5 | **Validateur déterministe de sortie** — SIREN cités ∈ tool results, pas de pattern prescriptif, sortie Pydantic parsable | Code, 0 LLM | 45 min | ✅ |
 | C6 | **Haiku-critic async** — second Haiku en tâche de fond qui score scope / hallucination / tonalité, badge confiance en UI | LLM, async | 1 h | ✅ |
 

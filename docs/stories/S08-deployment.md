@@ -1465,12 +1465,53 @@ parallel + transitions, le tour total dépasse 15 s **même quand tout
 fonctionne idéalement**. Le cap à 15 s confondait "agent stuck" et
 "réponse U3 légitime longue".
 
-**Fix B1bis** : `WALL_CLOCK_S` 15 → 30 s (`caps.py:_resolve_wall_clock_s`).
-30 s reste un filet de sécurité réel (un agent réellement bloqué ne
-pondrait pas 4 tool_use valides en 15 s), tout en couvrant l'UX
-produit U3. Cahier §5.3 + §14.3 C4 + stories README + test S05
-alignés. Pas de bump du wait_for cap par tool call — ce sont les
-filets de sécurité par appel, pas par tour.
+**Fix B1bis itération 1** : `WALL_CLOCK_S` 15 → 30 s
+(`caps.py:_resolve_wall_clock_s`). Cahier §5.3 + §14.3 C4 + stories
+README + test S05 alignés. Pas de bump du wait_for cap par tool call —
+ce sont les filets de sécurité par appel, pas par tour.
+
+**Itération 2 — re-test webapp post-deploy `7b001d4`** : le cap 30 s
+flap encore. User observation décisive : *"fail silencieux car après
+le dernier comptes-entreprise l'agent freeze, rien logg jusqu'au
+timeout"*. Pas de streaming entre la fin du round 2 (tool_results
+comptes-entreprise) et le cap 30 s.
+
+**Diagnostic affiné** : Anthropic prompt caching **n'est PAS activé**
+dans `agent.py` (vérifié : `client.messages.stream(**stream_kwargs)`
+sans cache_control sur system / tools / messages). Conséquence :
+chaque round, l'API re-tokenize tout le contexte cumulé. Au round 3
+de U3, le contexte = system (~2K) + tools (~3K) + 2 entrées
+sirenisateur (~2K) + 2 entrées comptes-entreprise sur 3 ans (~30-40K)
+= **~50 K tokens**. TTFT Sonnet sur 50 K tokens = 10-20 s avant le
+1er token de streaming. Ajouté aux 15-18 s de pre-stream, on dépasse
+30 s avant que la synthèse ne commence à s'afficher.
+
+**Fix B1bis itération 2** : `WALL_CLOCK_S` 30 → 60 s. 60 s couvre le
+worst case observé en webapp (TTFT lourd + streaming complet d'une
+synthèse 200-300 tokens). Cahier + tests + docs alignés.
+
+**Vrai fix produit (next-step S09)** : activer Anthropic prompt
+caching côté `agent.py`. Pattern :
+
+```python
+stream_kwargs = {
+    "system": [{
+        "type": "text",
+        "text": SYSTEM_PROMPT_AGENT,
+        "cache_control": {"type": "ephemeral"},  # cache 5 min TTL
+    }],
+    "tools": tools_schema_with_last_block_cache_control,
+    ...
+}
+```
+
+Effets attendus :
+- TTFT round N coupé 5-10× (cache HIT sur ~5 K tokens system+tools)
+- Possibilité de re-baisser `WALL_CLOCK_S` à 30 s
+- Coût réduit (cache reads ~10× moins chers que cache writes)
+
+Estimé 1 h d'effort + tests. À planifier en S09 polish ou avant un
+audit production.
 
 ### F. Tokens partagés en chat — à révoquer
 

@@ -70,13 +70,15 @@ def test_caps_single_source_of_truth() -> None:
 
     - ``MAX_TOOL_CALLS_PER_TURN`` 5→7 (cf. notes S08 §D + review S08 §B1)
     - ``MAX_TOKENS_PER_SESSION`` 50_000→80_000 (idem)
-    - ``WALL_CLOCK_S`` 15→30 (review S08 §B1bis : smoke U3 webapp prod
-      cancellait Sonnet en plein streaming après 4 tool calls valides ;
-      30 s reste un filet de sécurité utile sans confondre "agent
-      stuck" et "synthèse U3 légitime sur 25 K tokens de bilans").
+    - ``WALL_CLOCK_S`` 15→30→60 (review S08 §B1bis 2 itérations) :
+      le 30 s flapait encore en webapp prod (silent freeze post-
+      ``comptes-entreprise`` round 2 → cap firefires sur TTFT round
+      3 lourd). Cause racine : Anthropic prompt caching pas activé
+      côté ``agent.py`` ; vrai fix produit listé en next-step S09.
+      60 s couvre le pire cas observé.
     """
     assert MAX_TOOL_CALLS_PER_TURN == 7
-    assert WALL_CLOCK_S == 30
+    assert WALL_CLOCK_S == 60
     assert MAX_TOKENS_PER_SESSION == 80_000
 
 

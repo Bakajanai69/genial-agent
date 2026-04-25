@@ -18,16 +18,18 @@ Tout appel réseau doit être testé contre les APIs réelles.
 
 ### Décisions de cohérence (à appliquer par toutes les stories)
 
-1. **Cap tool calls par tour = 7** et **wall-clock = 30 s** (figés
+1. **Cap tool calls par tour = 7** et **wall-clock = 60 s** (figés
    dans `guardrails/caps.py` — single source of truth ; ré-alignés §4,
-   §5.3 et §14.3 C4 du cahier). Valeurs révisées après deux smoke
+   §5.3 et §14.3 C4 du cahier). Valeurs révisées après plusieurs smoke
    tests U3 sur l'URL Railway :
-   - tool calls 5 → 7 (cf. notes S08 §D + review S08 §B1) : 5 ne
-     tolérait pas une inefficacité de tool selection en U3.
-   - wall-clock 15 → 30 s (review S08 §B1bis) : 15 s coupait Sonnet
-     en plein streaming de la synthèse U3 (~25 K tokens de bilans),
-     alors qu'il avait déjà fait 4 tool calls valides.
-   Ensemble, 7 calls + 30 s + 80 K tokens couvrent U3 + 1 follow-up
+   - tool calls 5 → 7 (cf. notes S08 §D + review S08 §B1).
+   - wall-clock 15 → 30 → 60 s (review S08 §B1bis 2 itérations) :
+     30 s flapait encore en webapp prod parce que Anthropic prompt
+     caching n'est pas activé → TTFT round 3 sur 50-60 K tokens
+     cumulés explose. 60 s couvre le worst case. **Vrai fix produit
+     (prompt caching `agent.py`)** listé en next-step S09 — il
+     couperait TTFT 5-10× et permettrait de revenir à 30 s.
+   Ensemble, 7 calls + 60 s + 80 K tokens couvrent U3 + 1 follow-up
    multi-turn sans flap, tout en gardant un filet de sécurité réel.
 2. **Tool schemas** : unique point d'entrée
    `mcp_pappers.to_anthropic_schema(tools)` (S02). Consommé par S03.

@@ -21,11 +21,22 @@ machines dont la latence Pappers + Anthropic global cumulée dépasse
 la valeur cahier et déclenchent en permanence des escalades
 ``cap_wall_clock`` sur les tests live (cf. review S05 §I-1).
 
-**Bump 15 s → 30 s** (review S08 §B1bis, post smoke webapp prod) :
-le cap initial 15 s coupait Sonnet en plein streaming sur U3 (lourd,
-~25 K tokens de bilans à synthétiser). Cf. notes S08 §D2 pour les
-mesures de timing et la justification produit (un cap dur reste
-opportun, mais 15 s confond "agent stuck" et "réponse U3 légitime").
+**Bumps successifs WALL_CLOCK_S** (review S08 §B1bis post smoke prod) :
+
+- 15 → 30 s (1ère itération) : le cap 15 s coupait Sonnet en début
+  de streaming round 3.
+- 30 → 60 s (2ème itération, post-test webapp) : le 30 s flap encore
+  parce que **Anthropic prompt caching n'est PAS activé** côté
+  ``agent.py``. Conséquence : à chaque round, l'API re-tokenize tout
+  le contexte cumulé (system prompt + tools + N rounds × messages),
+  ce qui fait exploser le TTFT (Time To First Token) sur le 3ème
+  round U3 où le contexte cumulé atteint ~50-60 K tokens (sortie
+  Pappers ``comptes-entreprise`` × 2 entités × 3 ans). User
+  observation : "fail silencieux car après le dernier
+  comptes-entreprise l'agent freeze, rien logg jusqu'au timeout".
+  60 s couvre le pire cas observé (TTFT lourd + streaming complet).
+  **Vrai fix produit** : activer Anthropic prompt caching (système
+  + tools + messages N-1) — listé en next-step S09. Coupe TTFT 5-10×.
 """
 
 from __future__ import annotations
@@ -51,14 +62,16 @@ MAX_TOOL_CALLS_PER_TURN = 7
 # si on a besoin de scrubber dynamiquement en test, on monkey-patch
 # ``routing.WALL_CLOCK_S`` directement.
 #
-# Bump 15 → 30 s post-deploy (review S08 §B1bis) : le smoke U3 webapp
-# montrait Sonnet cancellé en plein streaming alors qu'il avait déjà
-# fait 4 tool calls valides (sirenisateur×2 ‖ comptes-entreprise×2).
-# 15 s confondait "agent stuck" (à juste titre cap'er) et "réponse
-# légitime sur 25 K tokens de bilans" (à laisser finir). 30 s reste
-# bounded enough pour un filet de sécurité (un agent réellement bloqué
-# ne pondrait pas 4 tool_use en 15 s) tout en couvrant l'UX U3.
-def _resolve_wall_clock_s(default: int = 30) -> int:
+# Bumps successifs post-deploy (review S08 §B1bis, 2 itérations) :
+# 15 → 30 → 60 s. La 2ème bump est venue d'un fail silencieux
+# observé en webapp prod : agent freeze 30 s après le dernier
+# tool_result avant que le cap 30 s firefires, sans ton/log
+# intermédiaire. Cause racine : pas de prompt caching Anthropic
+# dans ``agent.py`` → TTFT round 3 sur 50-60 K tokens cumulés est
+# trop lent. 60 s couvre le pire cas observé. Le vrai fix produit
+# (prompt caching) est listé en next-step S09 — il couperait le
+# TTFT 5-10× et permettrait de revenir à 30 s.
+def _resolve_wall_clock_s(default: int = 60) -> int:
     override = os.getenv("WALL_CLOCK_S_OVERRIDE")
     if not override:
         return default
