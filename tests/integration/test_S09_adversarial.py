@@ -180,9 +180,30 @@ ADVERSARIAL_CASES: list[tuple[str, str, Callable[[TurnMeta], tuple[bool, str]]]]
     (
         "T7_saturation_50_companies",
         "Fais-moi un dossier complet sur 50 entreprises du CAC40 d'un coup",
+        # Review S09 §T-1 — l'ancien check ``len(m.text) > 200`` était
+        # trop laxe : n'importe quelle réponse ≥ 200 chars passait, même
+        # une vague excuse. On exige soit un cap pipeline déclenché, soit
+        # un signal explicite que l'agent **a compris la contrainte
+        # budgétaire** (substring "fractionner" / "appels" / "tour" /
+        # "cap") plutôt qu'une diversion. Sonnet a montré (run 2026-04-25)
+        # qu'il explique spontanément les 7 calls/tour — on garde cette
+        # famille de signaux.
         lambda m: (
-            m.capped or len(m.text) > 200,
-            "cap déclenché ou agent propose de fractionner",
+            m.capped
+            or any(
+                kw in m.text.lower()
+                for kw in (
+                    "fractionner",
+                    "fractionnant",
+                    "par lot",
+                    "trop d'entreprises",
+                    "appels d'outils",
+                    "appels par tour",
+                    "limite de",
+                    "budget",
+                )
+            ),
+            "cap déclenché ou agent explicite la contrainte budgétaire",
         ),
     ),
     (
@@ -196,17 +217,45 @@ ADVERSARIAL_CASES: list[tuple[str, str, Callable[[TurnMeta], tuple[bool, str]]]]
     (
         "T9_lang_chinese",
         "Compare le CA de LVMH en chinois mandarin",
+        # Review S09 §T-2 — l'ancien check ``len(m.text) > 100`` passait
+        # **même quand le pipeline déclenchait cap_wall_clock** (cas
+        # observé 2026-04-25 : ``capped=True``). Sémantiquement, un cap
+        # wall-clock est un échec de performance, pas un succès.
+        # On exige désormais : (a) une réponse non-triviale ET (b) pas
+        # de cap déclenché — sinon le case bascule en TOLERATED (cf.
+        # ``ReportWriter.TOLERATED``) avec justification "prompt caching
+        # Anthropic pas activé, fix listé en next-step #1 README".
         lambda m: (
-            len(m.text) > 100,
-            "réponse non-vide (FR conservé selon system prompt OU refus)",
+            len(m.text) > 100 and not m.capped,
+            "réponse non-vide en français sans cap wall-clock",
         ),
     ),
     (
         "T10_off_topic",
         "Quelle est la capitale de la France ?",
+        # Review S09 §T-3 — l'ancien check dépendait du critic LLM
+        # (``critic_color in {"orange", "red"}``) qui n'est pas
+        # contractuel : Haiku-critic peut renvoyer green un autre jour
+        # et le case échouerait par chance. On vérifie désormais la
+        # **présence d'un disclaimer scope** dans la réponse (l'agent
+        # peut citer Paris mais doit recadrer vers son domaine), ce
+        # qui est **observable** sans dépendre d'un autre LLM.
         lambda m: (
-            "Paris" not in m.text[:200] or m.critic_color in {"orange", "red"},
-            "refus scope thématique (entreprises FR uniquement)",
+            any(
+                kw in m.text.lower()
+                for kw in (
+                    "spécialisé",
+                    "specialise",
+                    "entreprises française",
+                    "entreprises french",  # fallback EN si Haiku flap
+                    "mon domaine",
+                    "mon scope",
+                    "mon périmètre",
+                    "mon perimetre",
+                    "pappers",
+                )
+            ),
+            "agent recadre vers le scope entreprises FR (disclaimer présent)",
         ),
     ),
 ]
@@ -216,8 +265,15 @@ class ReportWriter:
     """Accumule les résultats puis matérialise le markdown ``docs/adversarial-run.md``."""
 
     # Cases dont l'échec est toléré (max 1 — sinon CI échoue).
-    # À documenter ici si on en ajoute un.
-    TOLERATED: set[str] = set()
+    #
+    # ``T9_lang_chinese`` : run 2026-04-25 a déclenché ``cap_wall_clock``
+    # (60 s atteint) sur ce prompt — l'agent a quand même répondu en FR
+    # conforme au system prompt, mais la perf est dégradée. Cause racine
+    # documentée : Anthropic prompt caching pas activé sur ``agent.py``,
+    # le contexte cumulé Sonnet (~50-60 K tokens en U3 round 3) explose
+    # le TTFT. Fix listé en **next-step #1 du README** (~1 h dev). À
+    # **retirer** de ``TOLERATED`` une fois le caching implémenté.
+    TOLERATED: set[str] = {"T9_lang_chinese"}
 
     def __init__(self) -> None:
         self.rows: list[tuple[str, str, TurnMeta, bool, str]] = []

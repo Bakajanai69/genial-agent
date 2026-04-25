@@ -5,7 +5,7 @@ Agent IA spécialisé sur les entreprises françaises, branché sur le
 exercice d'évaluation AI Builder (week-end, ~12 h).
 
 🔗 **Démo live** : <https://genial-agent-production.up.railway.app>
-🎬 **Loom 2 min** : <https://www.loom.com/share/<id-loom>>
+🎬 **Loom 2 min** : `https://www.loom.com/share/<id-loom>` *(à remplacer après enregistrement)*
 📦 **Repo** : <https://github.com/Bakajanai69/genial-agent>
 
 [![CI](https://github.com/Bakajanai69/genial-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/Bakajanai69/genial-agent/actions/workflows/ci.yml)
@@ -40,7 +40,9 @@ git clone https://github.com/Bakajanai69/genial-agent.git
 cd genial-agent
 cp .env.example .env
 # → remplir : ANTHROPIC_API_KEY + PAPPERS_API_KEY (les 2 clés sont
-#   testées E2E par le boot — un /health KO indique une clé invalide).
+#   testées E2E au boot — `curl localhost:8000/health | jq .status`
+#   doit renvoyer `"ok"` ; toute autre valeur (`"degraded"`/`"ko"`)
+#   indique une clé invalide ou un MCP indisponible).
 make install    # uv sync + pre-commit install
 make run        # chainlit run sur http://localhost:8000
 ```
@@ -119,8 +121,10 @@ mcp.pappers.fr/{API_KEY}
    `tools` + dernier `messages` block) — coupe TTFT 5-10× et
    ramène le wall-clock cap S04 de 60 s à 30 s. Effort ~1 h.
    Vrai fix produit du flap `WALL_CLOCK_S 30→60 s` noté en
-   review S08 §B1bis.
-1bis. **Slicing intelligent `comptes-entreprise`** — au lieu de
+   review S08 §B1bis. Aussi : retire `T9_lang_chinese` du set
+   `TOLERATED` du runner adversarial (cf.
+   `tests/integration/test_S09_adversarial.py`).
+2. **Slicing intelligent `comptes-entreprise`** — au lieu de
    la borne aveugle 16 K chars (`agent.py:_TOOL_RESULT_MAX_CHARS`)
    qui coupe les bilans Pappers très volumineux (706 K chars sur
    Carrefour Hypermarchés sans `annee`), extraire les sections
@@ -128,19 +132,20 @@ mcp.pappers.fr/{API_KEY}
    dernière année + 2 précédentes. Découverte du dogfooding S09
    inspection MCP, cf.
    [`docs/inspection-mcp-vs-agent.md`](docs/inspection-mcp-vs-agent.md).
+   Story dédiée [`S09.5`](docs/stories/S09.5-mcp-payload-handling.md).
    Effort ~2 h.
-2. **Bascule Bedrock EU** (Paris) ou **Vertex AI EU** (Frankfurt)
+3. **Bascule Bedrock EU** (Paris) ou **Vertex AI EU** (Frankfurt)
    pour résidence RGPD — `anthropic[bedrock]`, ~20 lignes.
-3. **Tracing distribué Langfuse / OpenTelemetry** — 1 trace par
+4. **Tracing distribué Langfuse / OpenTelemetry** — 1 trace par
    `run_guarded_turn`, 1 span par `llm_meta`. ~1 h.
-4. **Audit trail append-only** (S3 + manifest signé) — exigence type
+5. **Audit trail append-only** (S3 + manifest signé) — exigence type
    SOC 2 pour Cegid / Crédit Agricole. ~2 h.
-5. **Custom domain** `genial-agent.lancelotoudin.fr` — DNS + cert
+6. **Custom domain** `genial-agent.lancelotoudin.fr` — DNS + cert
    Railway. ~10 min.
-6. **Path filtering Railway repoTriggers** pour économiser les
+7. **Path filtering Railway repoTriggers** pour économiser les
    redeploys doc-only (cf. `docs/deployment.md` annexe). ~5 min via
    GraphQL.
-7. **Brief vocal ElevenLabs** (S10) — déclenché si gating §19.1 vert.
+8. **Brief vocal ElevenLabs** (S10) — déclenché si gating §19.1 vert.
 
 ## Licence
 

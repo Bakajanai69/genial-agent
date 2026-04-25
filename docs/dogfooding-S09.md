@@ -132,3 +132,43 @@ couvert par les tests live de cette session.
 > D9 (jailbreak), D10 (3 onglets). En l'absence de Review Agent
 > distinct, le push de la phase 2 vaut signature de mise en
 > production sur la branche d'évaluation.
+
+### Notes Review Agent — 2026-04-25 (post-phase 2)
+
+Re-review faite **sans rejouer les tests live** (consigne explicite :
+ne pas brûler de crédits Pappers). Couverture :
+
+- **Code/doc** : revue statique de `tests/integration/test_S09_*.py`,
+  `scripts/smoke_S09.sh`, `README.md`, `EVALUATION.md`,
+  `docs/adversarial-run.md`. 7 fixes appliqués (cf. commit
+  `review(S09): fix — …`). `make lint` ✅, `make test` 419/419 ✅.
+- **Hardening adversarial** vérifié hors live via `python -c` synthétique
+  (T7/T9/T10) : les nouveaux lambdas réagissent correctement aux
+  `TurnMeta` synthétiques (cap, substring, absence de critic).
+- **Idempotence cross-session** ajoutée comme assertion #4 explicite
+  dans `test_S09_concurrent.py` (vérifie le contrat
+  `IdempotenceCache.key(session_id, msg)` par construction —
+  promesse de la docstring désormais matchée par une assertion).
+
+**Blockers résiduels — à la main de Lancelot** (non-automatisables
+côté CLI) :
+
+1. **Loom 2 min** : enregistrer la vidéo (script §7 du scope), remplacer
+   les 3 occurrences de `<id-loom>` (README.md:8, EVALUATION.md:8,
+   EVALUATION.md:101) par l'ID réel.
+2. **6 screenshots** : créer `docs/demo-screenshots/` et y poser les
+   PNG `01-empty-state.png` … `06-mcp-ko-fallback.png`. Procédure :
+   ouvrir l'URL Railway dans le navigateur, capturer chaque scénario
+   du §"Manual dogfooding" du `S09-polish.md`, compresser à
+   ~600 Ko/PNG (`pngquant --quality 75-90`), commiter.
+3. **Re-dogfooding visuel D0/D0bis/D1/D11/D12** : ouvrir le navigateur,
+   vérifier logo (header + hero), toggler dark/light, footer RGPD,
+   idempotence (2× même message en < 60 s). Mettre à jour le tableau
+   D0–D12 ci-dessus avec les verdicts réels (✅/⚠) au lieu de
+   "à confirmer côté UI".
+4. **`docs/stories/README.md`** : passer S09 ligne 216 de
+   `🟡 en cours (dev done)` à `✅ approved` une fois les 3 items
+   ci-dessus traités.
+
+Tant que (1)/(2) ne sont pas résolus, le DoD §13 cahier "Loom enregistré"
++ "Screenshots des scénarios clés" reste KO.

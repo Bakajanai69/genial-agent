@@ -23,6 +23,7 @@ import pytest
 
 from genial_agent.agent import ConversationState
 from genial_agent.guardrails.pipeline import run_guarded_turn
+from genial_agent.observability.idempotence import IdempotenceCache
 
 pytestmark = pytest.mark.integration
 
@@ -86,3 +87,23 @@ async def test_3_concurrent_sessions_stay_isolated() -> None:
                 if other == expected:
                     continue
                 assert other not in content, f"crossover : state {expected} contient {other}"
+
+    # 4. Pas de fuite d'idempotence cross-session — promesse de la
+    #    docstring (review S09 §T-5). Le cache idempotence est peuplé
+    #    par ``app.py``, pas par ``run_guarded_turn`` directement, donc
+    #    on ne peut pas observer un cache hit cross-session via le
+    #    pipeline ici. On vérifie le contrat **par construction** : la
+    #    clé ``IdempotenceCache.key`` est préfixée par ``session_id``,
+    #    donc deux sessions différentes avec le même message produisent
+    #    deux clés distinctes — impossible de servir la réponse de l'une
+    #    à l'autre.
+    same_msg = "Donne-moi la fiche de LVMH"
+    key_a = IdempotenceCache.key(session_ids[0], same_msg)
+    key_b = IdempotenceCache.key(session_ids[1], same_msg)
+    assert key_a != key_b, f"clé idempotence identique cross-session : {key_a!r}"
+    assert key_a.startswith(f"{session_ids[0]}:"), (
+        f"clé {key_a!r} ne commence pas par session_id préfixe"
+    )
+    assert key_b.startswith(f"{session_ids[1]}:"), (
+        f"clé {key_b!r} ne commence pas par session_id préfixe"
+    )

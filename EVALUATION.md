@@ -5,7 +5,7 @@
 [![service](https://img.shields.io/website?url=https%3A%2F%2Fgenial-agent-production.up.railway.app%2Fhealth&up_message=online&down_message=offline&label=service)](https://genial-agent-production.up.railway.app/health)
 
 📧 **Feedback** : lancelot.oudin@gmail.com
-🎬 **Loom backup** : <https://www.loom.com/share/<id-loom>>
+🎬 **Loom backup** : `https://www.loom.com/share/<id-loom>` *(à remplacer après enregistrement)*
 
 ---
 
@@ -42,7 +42,10 @@ Clique sur **« 🧠 Compare Carrefour vs Casino »**. Tu dois voir :
   cf. `src/genial_agent/routing.py:COMPLEX_PATTERNS`).
 - Tableau comparatif sourcé avec **dates de bilan**
   (ex : *« CA 2023 : 94 Md€ (bilan clos 31/12/2023) »*).
-- Score critic vert ou orange (rouge = anomalie à signaler).
+- Score critic vert ou orange sur ce type de réponse factuelle. Le
+  rouge signale soit une anomalie (à reporter), soit un **refus
+  attendu** sur les tests 4 et 5 ci-dessous (refus de scope = critic
+  red **est le bon signal**).
 
 ### 3. Le multi-turn (30 s)
 
@@ -95,7 +98,7 @@ et le message ne descend même pas jusqu'à Claude.
 
 ## Et si ça casse
 
-- 🎬 Loom backup (2 min) : <https://www.loom.com/share/<id-loom>>
+- 🎬 Loom backup (2 min) : `https://www.loom.com/share/<id-loom>` *(à remplacer après enregistrement)*
 - 🔁 Local : `git clone … && cp .env.example .env && make install
   && make run` (clés API à fournir).
 - 📧 Email : lancelot.oudin@gmail.com.
