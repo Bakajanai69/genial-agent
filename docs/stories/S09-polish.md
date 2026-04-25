@@ -86,6 +86,15 @@ Sources de vérité :
 
 ### Dans le scope
 
+0. **Logo Genial** (UI polish) — remplacer le logo Chainlit par défaut
+   par le PNG fourni à la racine du repo
+   (``Genial_Logo_RVB_Baseline_Couleur-removebg-preview.png``,
+   805×310 px, RGBA transparente). Chainlit 2.11 lit
+   ``public/logo_light.png`` et ``public/logo_dark.png`` au boot et les
+   utilise à la fois dans le header (top-left) et sur l'écran d'accueil
+   (au-dessus des starters, juste au-dessus de la barre de saisie côté
+   empty state). Procédure exacte au §"Squelette logo" plus bas.
+
 1. **README.md** (remplacement complet du skeleton S01) — 1 page
    scrollable, ≤ 220 lignes :
    - Liens cliquables démo Railway + Loom + repo GitHub.
@@ -356,6 +365,20 @@ story(S09): refine — runner adversarial pipeline-réel, badge shields.io véri
 
 ### Fichiers à créer / modifier
 
+- ``public/logo_light.png`` — copie / dérivée de
+  ``Genial_Logo_RVB_Baseline_Couleur-removebg-preview.png``, ≤ 200 Ko,
+  largeur ~600-800 px (Chainlit redimensionne en CSS).
+- ``public/logo_dark.png`` — variante pour le thème sombre. Si le
+  logo couleur sur fond transparent reste lisible sur fond ``#0d1117``
+  (thème dark Chainlit par défaut), copier le même fichier ; sinon
+  fournir une variante (texte blanc / contour clair) — cf. dogfooding
+  D0bis.
+- (Optionnel) ``public/favicon.png`` — dérivée carrée 256×256 px du
+  logo (zoom sur le pictogramme sans baseline texte).
+- **Suppression** du PNG source à la racine
+  ``Genial_Logo_RVB_Baseline_Couleur-removebg-preview.png`` une fois
+  les copies posées dans ``public/`` — pas de duplication, et la
+  racine reste propre pour le clone GitHub.
 - ``README.md`` — remplacement complet du skeleton S01.
 - ``EVALUATION.md`` — nouveau, racine.
 - ``docs/adversarial-run.md`` — **généré** par le runner phase 2 ;
@@ -409,6 +432,8 @@ les écarts dans ``docs/dogfooding-S09.md``.
 
 | # | Action | Attendu observable | Notes à logger |
 |---|---|---|---|
+| **D0** | Ouvrir l'URL → onglet, regarder le **header** (top-left) ET la zone d'accueil au-dessus de la barre de saisie | Le logo **Genial** (couleur, baseline) remplace le logo Chainlit par défaut, à la fois en haut à gauche et en hero d'accueil | dimensions visuelles correctes (pas écrasé / pas pixelisé), pas de fallback "C" Chainlit visible |
+| **D0bis** | Toggler le thème dark → light → dark via le menu Chainlit | Le logo reste lisible sur les **deux** thèmes (contraste suffisant) | si la version dark est illisible : noter en bug B → utiliser une variante claire/blanche pour ``logo_dark.png`` |
 | **D1** | Ouvrir l'URL → empty state | 4 starters ⚡⚡🧠🧠 visibles, footer RGPD + lien GitHub présent | latence du 1er rendu (cold start ?), thème/couleur OK |
 | **D2** | Starter ⚡ "Fiche LVMH" | Réponse < 3 s, badge `⚡ Haiku`, SIREN cliquable, bannière "Contexte: LVMH (SIREN 775670417)", critic `✓ NN%` | délai first-token, nombre de steps tool, score critic |
 | **D3** | Suivi "Et son CA ?" | Bannière entité **inchangée** (ou enrichie), CA chiffré + date de bilan, pas de demande de précision | est-ce que l'agent comprend "son" = LVMH ? |
@@ -512,6 +537,60 @@ les écarts dans ``docs/dogfooding-S09.md``.
 > avec le verdict final (table + décision). Le Review Agent (phase 3)
 > rejoue **au moins** D2, D7, D9 et D10 pour vérifier que le Dev
 > Agent n'a pas tronqué un mauvais résultat.
+
+---
+
+### Squelette logo Chainlit (étape S09 §0)
+
+Chainlit 2.11.1 (cf. [doc officielle](https://docs.chainlit.io/customisation/custom-logo-and-favicon))
+charge automatiquement ``public/logo_light.png`` et
+``public/logo_dark.png`` au boot. Pas d'option ``[UI]`` à toucher dans
+``.chainlit/config.toml`` : c'est le **nom de fichier** qui fait foi.
+La doc précise aussi que les assets sont **mis en cache navigateur**
+— vider le cache (ou un Ctrl-Shift-R) après chaque modif locale,
+sinon on debug à blanc.
+
+Procédure :
+
+```bash
+# 1. À la racine du repo, le PNG source est déjà présent (805×310 RGBA).
+ls -lh Genial_Logo_RVB_Baseline_Couleur-removebg-preview.png
+
+# 2. Copier en place. Pas de retraitement obligatoire pour le MVP —
+#    Chainlit redimensionne via CSS. On peut compresser si > 200 Ko :
+#    ``optipng -o5 public/logo_light.png`` ou
+#    ``pngquant --quality 75-90 public/logo_light.png``.
+cp Genial_Logo_RVB_Baseline_Couleur-removebg-preview.png public/logo_light.png
+cp Genial_Logo_RVB_Baseline_Couleur-removebg-preview.png public/logo_dark.png
+
+# 3. Vérifier la lisibilité sur thème sombre (cf. dogfooding D0bis).
+#    Si le logo couleur passe mal sur ``#0d1117``, garder le même
+#    pour le MVP et documenter en next-step "fournir variante dark".
+
+# 4. Supprimer la copie à la racine (évite la duplication + zip GitHub
+#    plus propre).
+git rm -- Genial_Logo_RVB_Baseline_Couleur-removebg-preview.png
+
+# 5. Local : relancer ``make run`` + Ctrl-Shift-R sur le navigateur.
+# 6. Prod Railway : commit + push → auto-deploy → vider cache du
+#    navigateur (Cmd-Shift-Delete) avant la démo.
+```
+
+Notes Dockerfile : aucun changement nécessaire, ``public/`` est déjà
+dans le contexte de build (cf. ``.dockerignore`` S01) et Chainlit le
+sert depuis le runtime sans configuration ad hoc.
+
+Notes ``.dockerignore`` : vérifier que ``Genial_Logo_*.png`` n'est
+pas dans une whitelist au niveau racine (devrait être ignoré par
+défaut une fois supprimé du repo). Si jamais il était re-déposé à
+la racine, l'ajouter explicitement à ``.dockerignore`` pour empêcher
+qu'il fuite dans l'image (poids inutile + duplication).
+
+Notes thème : ``.chainlit/config.toml:118`` fixe ``default_theme =
+"dark"``. Le logo Genial baseline en couleur sur fond
+``#0d1117`` reste **lisible** dans 95 % des cas (le pictogramme et
+la baseline gardent contraste suffisant sur le RGBA transparent),
+mais c'est à confirmer en dogfooding D0bis et à corriger si KO.
 
 ---
 
@@ -1249,9 +1328,14 @@ feat(S09): README + EVALUATION + adversarial runner + screenshots + Loom
 
 ### Check-list spécifique S09
 
-- [ ] **``docs/dogfooding-S09.md``** existe, daté, signé, table D1 → D12
-      remplie. **Decision** = "démo prête à enregistrer". Aucun bug
-      bloquant ouvert.
+- [ ] **Logo Genial** présent : ``public/logo_light.png`` et
+      ``public/logo_dark.png`` committés, ``Genial_Logo_*.png`` à la
+      racine **supprimé**. Le logo s'affiche bien dans le header **et**
+      en hero d'accueil sur l'URL Railway, sur les 2 thèmes (vérif
+      D0/D0bis du dogfooding).
+- [ ] **``docs/dogfooding-S09.md``** existe, daté, signé, table D0 →
+      D12 remplie (D0/D0bis en plus de D1-D12). **Decision** = "démo
+      prête à enregistrer". Aucun bug bloquant ouvert.
 - [ ] Le Review Agent **rejoue** au minimum D2 (LVMH simple), D7
       (Carrefour vs Casino), D9 (jailbreak) et D10 (3 onglets
       concurrents) sur l'URL Railway, et confirme les verdicts du
@@ -1315,9 +1399,12 @@ Cochables indépendamment, testables.
       Loom + URL Railway visibles dans les 10 premières lignes.
 - [ ] ``EVALUATION.md`` accessible depuis la racine, parcours 5 min
       reproductible, badge live affiché.
-- [ ] ``docs/dogfooding-S09.md`` committé, scénarios D1 → D12 verdict
+- [ ] ``docs/dogfooding-S09.md`` committé, scénarios D0 → D12 verdict
       ✅ ou ⚠ (jamais ❌ bloquant), décision finale "démo prête",
       contre-signature Review Agent ajoutée en phase 3.
+- [ ] Logo Chainlit remplacé par Genial sur les 2 thèmes
+      (``public/logo_light.png`` + ``public/logo_dark.png`` présents,
+      racine du repo nettoyée).
 - [ ] ``docs/adversarial-run.md`` existe et score ≥ 9/10 (1 échec
       toléré max, justifié).
 - [ ] ``tests/integration/test_S09_adversarial.py`` + ``test_S09_concurrent.py``
