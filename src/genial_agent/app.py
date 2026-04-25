@@ -27,6 +27,17 @@ import structlog
 from genial_agent import mcp_pappers
 from genial_agent.agent import ConversationState
 from genial_agent.guardrails import budget, run_guarded_turn
+from genial_agent.guardrails.caps import DAILY_PAPPERS_CREDITS_CAP
+from genial_agent.observability import (
+    cache as idempotence_cache,
+)
+from genial_agent.observability import (
+    configure_logging,
+    mount_routes,
+)
+from genial_agent.observability import (
+    remaining as credits_remaining,
+)
 from genial_agent.ui.entity_tracker import (
     ActiveEntity,
     extract_active_entity,
@@ -36,7 +47,19 @@ from genial_agent.ui.events import TurnState, dispatch_event
 from genial_agent.ui.post_process import linkify_sirens, model_badge
 from genial_agent.ui.starters import STARTERS
 
+# S07 — configurer structlog JSON + monter /health et /stats AVANT que
+# Chainlit serve la 1ère requête. Les deux fonctions sont idempotentes
+# (flag interne) — ce module est ré-importé en test par TestClient
+# sans effet de bord.
+configure_logging()
+mount_routes()
+
 logger = structlog.get_logger(__name__)
+
+# Seuil "crédits bas" : 10 % du cap (cahier §16.3 R16 — bandeau
+# orange). En-deçà, l'UI affiche un avertissement non-bloquant avant
+# de lancer le pipeline.
+_CREDITS_LOW_THRESHOLD = max(1, DAILY_PAPPERS_CREDITS_CAP // 10)
 
 # Cap dur sur le healthcheck Pappers au boot d'un chat. Au-delà, on
 # bascule en mode "MCP KO" visible plutôt que de faire poireauter
@@ -141,70 +164,104 @@ async def on_message(message: cl.Message) -> None:
     """Pour chaque message utilisateur : drain ``run_guarded_turn``,
     rendre les events au fil de l'eau, post-traiter et mettre à jour
     la bannière entité.
+
+    S07 ajoute :
+
+    - bind ``session_id`` en ``contextvars`` pour scoper tous les logs
+      du turn (request_id sera bind plus tard par ``pipeline.py``) ;
+    - check idempotence ``(session_id, sha256(message))`` TTL 60 s avant
+      d'engager des crédits Pappers ;
+    - bandeau crédits bas si ``remaining < 10 % du cap`` (cahier §16.3) ;
+    - store de la réponse finale dans le cache idempotence post-pipeline.
     """
     state: ConversationState = cl.user_session.get("state") or ConversationState()
     session_id: str = _resolve_session_id()
 
-    # Bulle agent vide, sera remplie par stream_token / update.
-    msg = cl.Message(content="", author="Agent")
-    await msg.send()
+    with structlog.contextvars.bound_contextvars(session_id=session_id):
+        # 1. Idempotence — réponse cached < 60 s ?
+        cached = await idempotence_cache.get(session_id, message.content)
+        if cached is not None:
+            logger.info("ui_idempotence_hit")
+            await cl.Message(
+                content=cached + "\n\n_(réponse servie depuis le cache idempotence)_",
+                author="Agent",
+            ).send()
+            return
 
-    turn_state = TurnState(msg=msg)
+        # 2. Bandeau crédits bas (cahier §16.3 R16) — non-bloquant.
+        rem = credits_remaining()
+        if rem < _CREDITS_LOW_THRESHOLD:
+            logger.warning("ui_credits_low_banner", remaining=rem)
+            await cl.Message(
+                content=(
+                    f"⚠ **Budget Pappers dégradé** — il reste {rem} appels "
+                    f"sur {DAILY_PAPPERS_CREDITS_CAP} aujourd'hui. "
+                    f"Mode cache-only sur les entités connues "
+                    f"(LVMH, BNP, Carrefour)."
+                ),
+                author="Système",
+                type="system_message",
+            ).send()
 
-    turn_gen = run_guarded_turn(state, message.content, session_id)
-    try:
-        async for event in turn_gen:
-            await dispatch_event(event, turn_state)
-    finally:
-        # PEP 789 + S03 invariant I5 : libère ``state.lock`` même si un
-        # dispatch lève (typo dans events.py, run_guarded_turn cancellé
-        # par le client, etc.). Sans ``aclose()``, un onglet fermé
-        # pendant un stream peut laisser le lock détenu et bloquer le
-        # prochain ``run_turn`` de la même session.
-        await turn_gen.aclose()
-        # Drain des ``cl.Step`` orphelines : si le pipeline a coupé entre
-        # un ``tool_use`` et son ``tool_result`` (cap_wall_clock,
-        # cap_tool_calls_per_turn pendant l'exécution d'un outil,
-        # exception remontée du dispatcher…), une step reste ouverte
-        # côté UI = spinner infini visible pour l'évaluateur. On force
-        # leur sortie de context manager ici.
-        await _drain_orphan_steps(turn_state)
+        # Bulle agent vide, sera remplie par stream_token / update.
+        msg = cl.Message(content="", author="Agent")
+        await msg.send()
 
-    # Si le pipeline a refusé l'input (C1), la bulle agent a déjà été
-    # supprimée par le dispatcher → on n'ajoute rien (ni badge, ni
-    # bannière entité — il n'y a pas eu de tool call à scanner).
-    if turn_state.input_rejected:
-        return
+        turn_state = TurnState(msg=msg)
 
-    # Final pass linkify SIREN. ``linkify_applied`` est posé par le
-    # dispatcher si ``validator_degraded`` a tourné (déjà linkifié) ;
-    # sinon (chemin nominal sans hallucination détectée) on linkifie
-    # ici pour garantir le critère d'acceptation "SIREN cliquables".
-    # Bug B1 review : sans ce passage, un turn sans validator_degraded
-    # mais avec ``critic_result`` (qui pose ``final_text``) sortait
-    # du linkify final.
-    if not turn_state.linkify_applied:
-        msg.content = linkify_sirens(msg.content or "")
-        turn_state.linkify_applied = True
+        turn_gen = run_guarded_turn(state, message.content, session_id)
+        try:
+            async for event in turn_gen:
+                await dispatch_event(event, turn_state)
+        finally:
+            # PEP 789 + S03 invariant I5 : libère ``state.lock`` même si un
+            # dispatch lève (typo dans events.py, run_guarded_turn cancellé
+            # par le client, etc.). Sans ``aclose()``, un onglet fermé
+            # pendant un stream peut laisser le lock détenu et bloquer le
+            # prochain ``run_turn`` de la même session.
+            await turn_gen.aclose()
+            # Drain des ``cl.Step`` orphelines : si le pipeline a coupé
+            # entre un ``tool_use`` et son ``tool_result``, une step
+            # reste ouverte côté UI = spinner infini visible pour
+            # l'évaluateur. On force leur sortie de context manager ici.
+            await _drain_orphan_steps(turn_state)
+
+        # Si le pipeline a refusé l'input (C1), la bulle agent a déjà été
+        # supprimée par le dispatcher → on n'ajoute rien (ni badge, ni
+        # bannière entité — il n'y a pas eu de tool call à scanner). On
+        # ne stocke **pas** dans l'idempotence non plus : on ne veut pas
+        # qu'un input toxique soit servi-cached pendant 60 s.
+        if turn_state.input_rejected:
+            return
+
+        # Final pass linkify SIREN. ``linkify_applied`` est posé par le
+        # dispatcher si ``validator_degraded`` a tourné (déjà linkifié) ;
+        # sinon (chemin nominal sans hallucination détectée) on linkifie
+        # ici pour garantir le critère d'acceptation "SIREN cliquables".
+        if not turn_state.linkify_applied:
+            msg.content = linkify_sirens(msg.content or "")
+            turn_state.linkify_applied = True
+            turn_state.final_text = msg.content
+            await msg.update()
+
+        # Badge modèle final + sub-line confiance critic (déjà ajouté par
+        # ``critic_result`` event si le critic a tourné).
+        badge = model_badge(
+            model_used=turn_state.model_used,
+            escalated=turn_state.escalated,
+            escalation_mode=turn_state.escalation_mode,
+        )
+        msg.content = (msg.content or "") + f"\n\n---\n*Modèle : {badge}*"
         turn_state.final_text = msg.content
         await msg.update()
 
-    # Badge modèle final + sub-line confiance critic (déjà ajouté par
-    # ``critic_result`` event si le critic a tourné). Le badge modèle
-    # est appendé à ``msg.content`` après le critic — ainsi il survit
-    # au cas où le critic mute ``msg.content`` indépendamment.
-    badge = model_badge(
-        model_used=turn_state.model_used,
-        escalated=turn_state.escalated,
-        escalation_mode=turn_state.escalation_mode,
-    )
-    msg.content = (msg.content or "") + f"\n\n---\n*Modèle : {badge}*"
-    turn_state.final_text = msg.content
-    await msg.update()
+        # Bannière entité active (idempotente, no-op si entité inchangée).
+        entity = extract_active_entity(turn_state.tracker)
+        await _update_entity_banner(entity)
 
-    # Bannière entité active (idempotente, no-op si entité inchangée).
-    entity = extract_active_entity(turn_state.tracker)
-    await _update_entity_banner(entity)
+        # 3. Store dans le cache idempotence pour les 60 prochaines secondes.
+        if msg.content:
+            await idempotence_cache.set(session_id, message.content, msg.content)
 
 
 async def _drain_orphan_steps(turn_state: TurnState) -> None:

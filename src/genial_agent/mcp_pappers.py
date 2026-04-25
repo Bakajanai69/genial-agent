@@ -465,6 +465,13 @@ async def call_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
         is_error=False,
     )
     await cache.set(name, args, payload)
+    # S07 — instrumentation au call-site succès. Cache hit (return en
+    # amont) et erreurs métier (raise) ne passent pas ici, donc on ne
+    # double-compte pas. Import tardif pour éviter la dépendance
+    # cyclique (observability → guardrails.caps via credit_guard).
+    from genial_agent.observability.stats import incr as _stats_incr
+
+    _stats_incr(total_tool_calls=1, pappers_calls_today=1)
     return payload
 
 

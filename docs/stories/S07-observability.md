@@ -1388,7 +1388,8 @@ kill %1
 - [x] Phase 1 commitée
       (`story(S07): refine — Chainlit prepend routes, structlog 25.5
       chain, sync stats, call-site refs`).
-- [ ] Phase 2 commitée + tests verts.
+- [x] Phase 2 commitée + tests verts (52 tests S07 unitaires, 373
+      total ; lint clean ; smoke `/health` et `/stats` validés).
 - [ ] Phase 3 approuvée.
 - [ ] Ligne S07 mise à jour dans `docs/stories/README.md` → ✅.
 - [ ] Push effectué.

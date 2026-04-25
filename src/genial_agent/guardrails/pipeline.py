@@ -50,6 +50,7 @@ from genial_agent.guardrails.token_budget import (
     REASON_CODE_CAP_TOKEN_BUDGET,
     budget,
 )
+from genial_agent.observability.stats import incr as stats_incr
 
 # ``run_routed_turn`` est importé **lazy** dans ``run_guarded_turn``
 # pour casser la boucle d'import : ``routing.py`` consomme
@@ -147,6 +148,21 @@ async def run_guarded_turn(
                 in_tok = int(event.get("input_tokens") or 0)
                 out_tok = int(event.get("output_tokens") or 0)
                 await budget.add(session_id, in_tok, out_tok)
+                # S07 — instrumentation centrale. Le pipeline est le seul
+                # endroit qui voit tous les ``llm_meta`` (Haiku initial +
+                # Sonnet en cas d'escalade) ; instrumenter dans
+                # ``agent.run_turn`` doublerait les compteurs. Le bind
+                # contextvar du ``request_id`` scope les logs Anthropic
+                # par appel ; chaque appel écrase le précédent (souhaité,
+                # le ``request_id`` est par-appel pas par-turn).
+                stats_incr(
+                    total_turns=1,
+                    anthropic_input_tokens=in_tok,
+                    anthropic_output_tokens=out_tok,
+                )
+                request_id = event.get("request_id")
+                if request_id:
+                    structlog.contextvars.bind_contextvars(request_id=request_id)
                 if not budget_emitted and await budget.exhausted(session_id):
                     budget_emitted = True
                     yield {

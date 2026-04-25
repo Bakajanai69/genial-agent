@@ -98,3 +98,18 @@ def _reset_guardrails_state() -> Iterator[None]:
     response-hash en post-MVP).
     """
     yield
+
+
+@pytest.fixture(autouse=True)
+def _fresh_stats() -> Iterator[None]:
+    """Reset les compteurs S07 entre tests pour isolation totale.
+
+    ``stats._stats`` est un singleton module-level — sans ce reset, un
+    test qui ``incr(pappers_calls_today=100)`` colle ``degraded() ==
+    True`` sur tous les tests suivants.
+    """
+    from genial_agent.observability import stats as _stats_mod
+
+    _stats_mod.reset_for_tests()
+    yield
+    _stats_mod.reset_for_tests()
