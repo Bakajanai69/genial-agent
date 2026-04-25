@@ -120,6 +120,15 @@ mcp.pappers.fr/{API_KEY}
    ramène le wall-clock cap S04 de 60 s à 30 s. Effort ~1 h.
    Vrai fix produit du flap `WALL_CLOCK_S 30→60 s` noté en
    review S08 §B1bis.
+1bis. **Slicing intelligent `comptes-entreprise`** — au lieu de
+   la borne aveugle 16 K chars (`agent.py:_TOOL_RESULT_MAX_CHARS`)
+   qui coupe les bilans Pappers très volumineux (706 K chars sur
+   Carrefour Hypermarchés sans `annee`), extraire les sections
+   clés (CA, résultat net, total actif, effectif moyen) sur la
+   dernière année + 2 précédentes. Découverte du dogfooding S09
+   inspection MCP, cf.
+   [`docs/inspection-mcp-vs-agent.md`](docs/inspection-mcp-vs-agent.md).
+   Effort ~2 h.
 2. **Bascule Bedrock EU** (Paris) ou **Vertex AI EU** (Frankfurt)
    pour résidence RGPD — `anthropic[bedrock]`, ~20 lignes.
 3. **Tracing distribué Langfuse / OpenTelemetry** — 1 trace par

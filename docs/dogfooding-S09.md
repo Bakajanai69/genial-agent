@@ -76,6 +76,21 @@ sous-estime pas non plus). Bon signal pour la robustesse §5.3.
 
 ## Bugs / écarts trouvés
 
+- **B0 (finding majeur, documenté en next-step #1bis)** — Inspection
+  manuelle MCP Pappers vs réponse agent (cf.
+  [`docs/inspection-mcp-vs-agent.md`](inspection-mcp-vs-agent.md)).
+  Le payload `comptes-entreprise` Pappers est massif sur les grosses
+  entités (706 019 chars sur Carrefour Hypermarchés sans `annee`,
+  85 433 chars avec `annee=2023`). La borne agent
+  `_TOOL_RESULT_MAX_CHARS=16_000` (`agent.py:399`) coupe brutalement
+  → l'agent voit le **début** du JSON (années anciennes) et **rate
+  les bilans récents**. **L'agent a conscience de la troncature et
+  le signale** ("données tronquées") plutôt que d'inventer un
+  chiffre — c'est un **signal robustesse fort**. Fix de fond =
+  slicing intelligent (next-step #1bis README, ~2 h, story propre).
+  **Mitigation démo** : ne pas montrer le CA Carrefour seul dans le
+  Loom — préférer la comparaison U3 (Sonnet propose la bonne
+  stratégie multi-step).
 - **B1 (informatif)** — `test_S08_u3_live::test_u3_heavy_compare_passes_without_cap_hit`
   a flap pendant ce dogfooding sur un timeout MCP Pappers (15 s sur
   un `call_tool`). Ce **n'est pas** une régression caps S08 §B1 (le
