@@ -1,0 +1,57 @@
+# Secrets et venv local — JAMAIS dans l'image
+.env
+.env.*
+.venv/
+venv/
+env/
+
+# Git
+.git/
+.gitignore
+.gitleaks.toml
+.github/
+
+# Caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.cache/
+
+# Chainlit runtime artifacts (mais on garde config.toml versionné — cf. S06)
+.chainlit/.session_files/
+.files/
+
+# Documentation et tests : hors image runtime
+docs/
+tests/
+chainlit.md.bak
+
+# Markdown : exclu sauf README (requis par hatchling au uv sync) et
+# chainlit.md (affiché dans l'UI au démarrage)
+*.md
+!README.md
+!chainlit.md
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# CI / dev tooling hors image
+.python-version
+.pre-commit-config.yaml
+
+# Local dumps
+*.log
+*.local
+
+# Image et artefacts Docker
+Dockerfile
+.dockerignore

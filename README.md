@@ -38,6 +38,20 @@ Copier `.env.example` → `.env` et remplir les clés API
 (`ANTHROPIC_API_KEY`, `PAPPERS_API_KEY`, et optionnellement
 `ELEVENLABS_API_KEY` pour le stretch vocal S10).
 
+## Déploiement
+
+L'agent tourne en prod sur **Railway EU-West (Amsterdam)** :
+
+🌐 **URL publique** : _à compléter post-deploy (cf. `docs/deployment.md` §6)._
+
+Config-as-code dans `railway.json` (région, healthcheck, restart).
+Procédure complète + troubleshooting dans
+[`docs/deployment.md`](docs/deployment.md).
+
+Keep-alive **UptimeRobot** (plan Free) ping `/health` toutes les
+5 min en mode keyword `"status":"ok"` pour empêcher le cold start
+et alerter sur panne MCP Pappers pendant le week-end d'évaluation.
+
 ## Livraison
 
 Repo : `github.com/Bakajanai69/genial-agent`
