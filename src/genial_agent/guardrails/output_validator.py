@@ -30,6 +30,17 @@ from pydantic import BaseModel, Field
 from genial_agent.guardrails.sirens import extract_sirens
 
 # ---------------------------------------------------------------------------
+# Disclaimer texts (single source of truth — testés par référence)
+# ---------------------------------------------------------------------------
+
+DISCLAIMER_ADVISORY = (
+    "⚠ Cet agent fournit des informations factuelles sourcées (Pappers) "
+    "et **pas** de conseil financier ou de recommandation d'investissement. "
+    "Les formulations prescriptives détectées dans la réponse sont à considérer "
+    "comme telles."
+)
+
+# ---------------------------------------------------------------------------
 # Reason codes (cohérent S04 pattern)
 # ---------------------------------------------------------------------------
 
@@ -62,13 +73,19 @@ ADVISORY_PATTERNS: list[re.Pattern[str]] = [
 # ---------------------------------------------------------------------------
 
 # Détecte :
-# - montants monétaires (``94 Md€``, ``2,3 millions``, ``5k€``),
+# - montants monétaires (``94 Md€``, ``2,3 millions``, ``5k€``) — un seul
+#   chiffre suffit côté montant car l'unité (``€``, ``millions``…) lève
+#   l'ambiguïté ;
 # - libellés ``CA``, ``chiffre d'affaires``, ``résultat net``, ``effectif``
-#   suivis d'un chiffre (ex : ``CA: 94``, ``effectif 120``).
+#   suivis d'**au moins 2 chiffres** (ex : ``CA: 94``, ``effectif 120``).
+#   On exige 2+ chiffres pour éviter les faux positifs sur des phrases
+#   sans contexte chiffré majeur (``effectif: 1 employé``, ``CA des
+#   années 1980``) qui déclenchaient à tort le disclaimer
+#   ``missing_bilan_date``.
 MONEY_RE = re.compile(
     r"\b(?:\d[\d\s.,]*\s?(?:€|md€|m€|k€|milliards?|millions?)"
     r"|(?:CA|chiffre\s+d['’]affaires|résultat\s+net|resultat\s+net|effectif)"
-    r"\s*[:=]?\s*\d)",
+    r"\s*[:=]?\s*\d{2,})",
     re.IGNORECASE,
 )
 
@@ -94,13 +111,6 @@ def _has_orphan_money_without_bilan(text: str) -> bool:
 # ---------------------------------------------------------------------------
 # Schémas Pydantic (parsable par S06 / S07 pour agrégation stats)
 # ---------------------------------------------------------------------------
-
-
-class Source(BaseModel):
-    """Une source citable — SIREN Luhn-valide + date de bilan optionnelle."""
-
-    siren: str = Field(pattern=r"^\d{9}$")
-    bilan_date: str | None = None
 
 
 class OutputValidationResult(BaseModel):
@@ -174,14 +184,19 @@ def validate_response(
 def degrade(result: OutputValidationResult, text: str) -> tuple[str, bool]:
     """Applique la dégradation sur la réponse selon les issues détectées.
 
-    Politique (cf. S05 phase 1 elicitation) :
+    Politique (cf. S05 phase 1 elicitation, ajustée par la review S05) :
 
     - ``orphan_sirens`` → disclaimer visible + ``needs_llm_retry=True``
       (exploité post-MVP ; MVP ignore cette valeur).
     - ``missing_bilan_date`` → disclaimer « dates manquantes, vérifier
       sur Pappers ».
-    - ``advisory_language`` → reframing silencieux (sub regex →
-      ``[reformulation neutre]``).
+    - ``advisory_language`` → disclaimer ajouté **en pied** (cf.
+      ``DISCLAIMER_ADVISORY``). Le sub-regex initial transformait
+      ``"Je te conseille d'investir"`` en
+      ``"[reformulation neutre] d'investir"``, grammaticalement cassé
+      et trompeur côté UX. Un disclaimer explicite est plus clair pour
+      l'utilisateur ET conserve l'intégrité de la réponse originale,
+      ce qui permet à un humain de juger de la qualité de l'agent.
 
     Returns:
         ``(text_dégradé, needs_llm_retry)`` — ``needs_llm_retry`` est
@@ -202,8 +217,7 @@ def degrade(result: OutputValidationResult, text: str) -> tuple[str, bool]:
             "manquante). Vérifier sur Pappers pour le contexte exact."
         )
     if REASON_CODE_ADVISORY_LANGUAGE in result.issues:
-        for p in ADVISORY_PATTERNS:
-            text = p.sub("[reformulation neutre]", text)
+        disclaimers.append(DISCLAIMER_ADVISORY)
     if disclaimers:
         text = text + "\n\n" + "\n".join(disclaimers)
     return text, needs_retry

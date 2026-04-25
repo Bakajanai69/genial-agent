@@ -37,7 +37,6 @@ from typing import Any
 import structlog
 
 from genial_agent.agent import ConversationState
-from genial_agent.guardrails.caps import MAX_TOKENS_PER_SESSION
 from genial_agent.guardrails.critic import CriticResult, critique_async
 from genial_agent.guardrails.input_gate import evaluate_input
 from genial_agent.guardrails.output_validator import (
@@ -117,7 +116,7 @@ async def run_guarded_turn(
         yield {
             "type": "capped",
             "reason_code": REASON_CODE_CAP_TOKEN_BUDGET,
-            "reason": f"{MAX_TOKENS_PER_SESSION} tokens/session",
+            "reason": f"{budget.cap} tokens/session",
         }
         return
 
@@ -126,32 +125,45 @@ async def run_guarded_turn(
     allowed_sirens: set[str] = set()
     budget_emitted = False
 
-    async for event in run_routed_turn(state, user_message):
-        # Forward tel quel (superset, pas de mutation).
-        yield event
+    # PEP 789 — un async generator imbriqué doit être explicitement
+    # ``aclose()``-é dans un ``try/finally`` quand on l'itère depuis un
+    # autre async generator. Sans ce filet, si le consumer (S06) ferme
+    # ``run_guarded_turn`` (déconnexion utilisateur, exception en
+    # amont), l'inner generator ``run_routed_turn`` se voit fermé par
+    # GC plus tard, ce qui peut leaker ``state.lock`` (cf. invariant
+    # I5 S03) ou des connexions Anthropic encore ouvertes. Cohérent
+    # avec le pattern S04 ``run_routed_turn`` qui fait de même sur son
+    # inner ``run_turn``.
+    routed = run_routed_turn(state, user_message)
+    try:
+        async for event in routed:
+            # Forward tel quel (superset, pas de mutation).
+            yield event
 
-        etype = event.get("type")
-        if etype == "text":
-            text_chunks.append(event.get("content", ""))
-        elif etype == "llm_meta":
-            in_tok = int(event.get("input_tokens") or 0)
-            out_tok = int(event.get("output_tokens") or 0)
-            await budget.add(session_id, in_tok, out_tok)
-            if not budget_emitted and await budget.exhausted(session_id):
-                budget_emitted = True
-                yield {
-                    "type": "capped",
-                    "reason_code": REASON_CODE_CAP_TOKEN_BUDGET,
-                    "reason": f"{MAX_TOKENS_PER_SESSION} tokens/session",
-                }
-        elif etype == "tool_result":
-            # Collecte des SIREN Luhn-valides dans les tool_results pour
-            # ``allowed_sirens`` du validator. ``content_preview`` est
-            # tronqué à 200 chars (contrat S03) — suffisant dans 99 %
-            # des cas car les SIREN Pappers sont en tête de payload
-            # (``{"siren": "...", ...}``). Cf. annexe B de la story.
-            preview = event.get("content_preview") or ""
-            allowed_sirens |= extract_sirens(preview, luhn_only=True)
+            etype = event.get("type")
+            if etype == "text":
+                text_chunks.append(event.get("content", ""))
+            elif etype == "llm_meta":
+                in_tok = int(event.get("input_tokens") or 0)
+                out_tok = int(event.get("output_tokens") or 0)
+                await budget.add(session_id, in_tok, out_tok)
+                if not budget_emitted and await budget.exhausted(session_id):
+                    budget_emitted = True
+                    yield {
+                        "type": "capped",
+                        "reason_code": REASON_CODE_CAP_TOKEN_BUDGET,
+                        "reason": f"{budget.cap} tokens/session",
+                    }
+            elif etype == "tool_result":
+                # Collecte des SIREN Luhn-valides dans les tool_results pour
+                # ``allowed_sirens`` du validator. ``content_preview`` est
+                # tronqué à 200 chars (contrat S03) — suffisant dans 99 %
+                # des cas car les SIREN Pappers sont en tête de payload
+                # (``{"siren": "...", ...}``). Cf. annexe B de la story.
+                preview = event.get("content_preview") or ""
+                allowed_sirens |= extract_sirens(preview, luhn_only=True)
+    finally:
+        await routed.aclose()
 
     # --- C5 Output validator ---
     final_text = "".join(text_chunks)
@@ -182,15 +194,24 @@ async def run_guarded_turn(
     yield {"type": "critic_pending"}
     critic_task = asyncio.create_task(critique_async(user_message, final_text))
     try:
-        critic = await asyncio.wait_for(critic_task, timeout=CRITIC_TIMEOUT_S)
-    except TimeoutError:
-        critic_task.cancel()
-        logger.warning("pipeline_critic_timeout", session_id=session_id)
-        critic = CriticResult(
-            scope_ok=True,
-            hallucination_risk="low",
-            advisory_language=False,
-            confidence=0.0,
-            issues=["critic_timeout"],
-        )
+        try:
+            critic = await asyncio.wait_for(critic_task, timeout=CRITIC_TIMEOUT_S)
+        except TimeoutError:
+            logger.warning("pipeline_critic_timeout", session_id=session_id)
+            critic = CriticResult(
+                scope_ok=True,
+                hallucination_risk="low",
+                advisory_language=False,
+                confidence=0.0,
+                issues=["critic_timeout"],
+            )
+    finally:
+        # Si le consumer ``aclose()`` le pipeline entre l'émission de
+        # ``critic_pending`` et le yield de ``critic_result``, ou si
+        # ``wait_for`` lève autre chose qu'un ``TimeoutError`` (annulation
+        # parente), on s'assure que le ``critic_task`` ne fuite pas en
+        # arrière-plan. ``cancel()`` est idempotent et un no-op si la
+        # task est déjà terminée.
+        if not critic_task.done():
+            critic_task.cancel()
     yield {"type": "critic_result", **critic.to_event()}

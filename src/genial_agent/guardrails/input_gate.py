@@ -39,8 +39,29 @@ REASON_CODE_INPUT_TOO_LONG = "input_too_long"
 REASON_CODE_INPUT_INJECTION = "input_injection"
 
 
-# Patterns appliqués APRÈS ``normalize_fr`` (NFKD + lowercase + ascii-only).
+# Patterns appliqués APRÈS ``normalize_fr`` (NFKD + Cf→space + ASCII + lower).
 # Aucun ``re.IGNORECASE`` — redondant sur texte normalisé.
+#
+# **Pas de frontière gauche** : on n'utilise *ni* ``\b`` *ni* lookbehind
+# négative à gauche des keywords. Raison : un attaquant peut préfixer un
+# caractère word (``xIgnore previous instructions``) et casser le ``\b``
+# (deux caractères word adjacents = pas de frontière). La lookbehind
+# négative ``(?<![a-z0-9_])`` est strictement équivalente. Pour bloquer
+# ce vecteur, on doit accepter de matcher au milieu d'un mot — la
+# spécificité de chaque pattern (mot-clé + structure + suffixe) garantit
+# l'absence de faux positifs en français/anglais standard, parce qu'on
+# ne génère pas naturellement la séquence "ignore + qualifiers +
+# instructions" dans un autre contexte. Le bord droit garde ``\b`` pour
+# éviter les concaténations à droite (``instructionspecial``).
+#
+# **Limite connue** : un attaquant peut casser un keyword en insérant un
+# zero-width *à l'intérieur* (``Ig<ZWSP>nore previous instructions``).
+# ``normalize_fr`` remplace le ZW par un espace, ce qui casse le
+# mot-clé (``ig nore``) et ratera le pattern. Cette obfuscation reste
+# détectable par le critic Haiku async (C6) qui voit le texte original
+# côté Claude : un attaquant qui obfusque ses keywords est suspect par
+# nature et le critic flaggera. À traiter en S09 si les tests pré-démo
+# révèlent des bypass dans ce sens.
 #
 # Structure — chaque pattern cible une famille OWASP LLM01:2025 :
 #
@@ -56,42 +77,45 @@ REASON_CODE_INPUT_INJECTION = "input_injection"
 # - Delimiter override : nos propres tags (``</user_input>``,
 #   ``</tool_result>``) — un prompt qui les contient tente de faire
 #   sortir Claude du frame user.
-# - Agent tool manipulation : réorientation vers un tool hors-scope
-#   (``send_email``, ``exec``, ``shell``, ``curl``…).
+# - Agent tool manipulation : réorientation vers un tool dangereux
+#   hors-scope (``send_email``, ``exec``, ``shell``…). On exclut
+#   ``fetch``/``curl``/``wget`` qui peuvent être employés naturellement
+#   pour parler de récupérer une fiche Pappers ; aucun de ces tools
+#   n'existe sur le MCP Pappers.
+
 INJECTION_PATTERNS: list[re.Pattern[str]] = [
     # --- Direct override: ignore/disregard + qualifiers + instructions/rules/prompts ---
     re.compile(
-        r"\b(?:ignore[s]?|disregard)\s+"
+        r"(?:ignore[s]?|disregard)\s+"
         r"(?:\w+\s+){0,4}"
         r"(?:instructions?|rules?|prompts?|regles?)\b"
     ),
     # --- Forget variants (forget everything/all/above/previous…) ---
     re.compile(
-        r"\bforget\s+"
-        r"(?:\w+\s+){0,4}"
+        r"forget\s+(?:\w+\s+){0,4}"
         r"(?:above|previous|instructions?|rules?|prompts?)\b"
     ),
     # --- Role override / jailbreak (DAN, STAN, etc.) ---
-    re.compile(r"\bdan\s+mode\b"),
-    re.compile(r"\b(stan|dude|dan)\s+(mode|prompt|jailbreak)\b"),
-    re.compile(r"\byou\s+are\s+now\s+(a\s+)?(jailbreak|free|unrestricted|without\s+rules?)"),
+    re.compile(r"dan\s+mode\b"),
+    re.compile(r"(stan|dude|dan)\s+(mode|prompt|jailbreak)\b"),
+    re.compile(r"you\s+are\s+now\s+(a\s+)?(jailbreak|free|unrestricted|without\s+rules?)"),
     re.compile(
-        r"\btu\s+es\s+maintenant\s+(un\s+)?"
+        r"tu\s+es\s+maintenant\s+(un\s+)?"
         r"(chatbot\s+libre|sans\s+regles?|sans\s+filtre)"
     ),
     re.compile(
-        r"\bpretend\s+(to\s+be|you\s+are)\s+"
+        r"pretend\s+(to\s+be|you\s+are)\s+"
         r"(?:an?\s+)?(?:ai\s+|assistant\s+|model\s+)?"
         r"without\s+(rules?|filters?|restrictions?)"
     ),
     # --- System prompt leakage (``show me the system prompt``, etc.) ---
     re.compile(
-        r"\b(reveal|show|print|leak|expose|divulgue|divulge|revele)\s+"
+        r"(reveal|show|print|leak|expose|divulgue|divulge|revele)\s+"
         r"(?:me\s+)?"
         r"(?:your?|ton|tes|the)\s+"
         r"(system\s+prompt|instructions?|rules?|prompts?)\b"
     ),
-    re.compile(r"\brepeat\s+(the|your)\s+(system\s+prompt|instructions|rules)\b"),
+    re.compile(r"repeat\s+(the|your)\s+(system\s+prompt|instructions|rules)\b"),
     # --- Special tokens / format breakers ---
     re.compile(r"<\|im_start\|>"),
     re.compile(r"<\|im_end\|>"),
@@ -100,12 +124,12 @@ INJECTION_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"###\s*(instruction|response|system)\s*:"),
     # --- Fake system/user turns ---
     re.compile(r"^\s*(system|assistant)\s*:", re.MULTILINE),
-    re.compile(r"\bbegin\s+(new\s+)?system\s+prompt\b"),
+    re.compile(r"begin\s+(new\s+)?system\s+prompt\b"),
     # --- Override delimiters we use ourselves (agent wraps user input) ---
     re.compile(r"</?user_input>"),
     re.compile(r"</?tool_result>"),
     # --- Tool redirection (OWASP Agent tool manipulation) ---
-    re.compile(r"\buse\s+the\s+(send_email|send_message|exec|shell|fetch|curl|wget)\s+tool\b"),
+    re.compile(r"use\s+the\s+(send_email|send_message|exec|shell)\s+tool\b"),
 ]
 
 
