@@ -1448,6 +1448,30 @@ Toujours **non configuré** (Lancelot doit le faire côté UI). Procédure
 inchangée dans `docs/deployment.md` §8. À cocher dans
 `docs/stories/README.md` § « Avant S08 » une fois fait.
 
+### B1bis. Cap wall-clock 15 s coupait Sonnet en plein streaming U3 (post-review)
+
+**Symptôme** : 2026-04-25, après le commit review S08 (`0d802e2`),
+nouveau smoke webapp U3 — *« Compare la santé financière de Carrefour
+et Casino sur 3 ans »*. L'agent fait 4 tool calls en parallèle bien
+choisis (2 ``sirenisateur`` ‖, 2 ``comptes-entreprise`` ‖) — le bump
+B1 (cap tool_calls 5→7 + prompt anti-redondance SIREN) marche bien.
+Mais le cap **``wall_clock`` à 15 s** hit pendant la synthèse finale,
+critic 20 % ("pas de données financières fournies").
+
+**Diagnostic** : Sonnet sur 25 K+ tokens de bilans à synthétiser =
+TTFT 1-2 s + streaming 200 tokens à ~10 tokens/s = ~10 s rien que pour
+la réponse finale. Cumulé au preamble streaming + 4 tool calls
+parallel + transitions, le tour total dépasse 15 s **même quand tout
+fonctionne idéalement**. Le cap à 15 s confondait "agent stuck" et
+"réponse U3 légitime longue".
+
+**Fix B1bis** : `WALL_CLOCK_S` 15 → 30 s (`caps.py:_resolve_wall_clock_s`).
+30 s reste un filet de sécurité réel (un agent réellement bloqué ne
+pondrait pas 4 tool_use valides en 15 s), tout en couvrant l'UX
+produit U3. Cahier §5.3 + §14.3 C4 + stories README + test S05
+alignés. Pas de bump du wait_for cap par tool call — ce sont les
+filets de sécurité par appel, pas par tour.
+
 ### F. Tokens partagés en chat — à révoquer
 
 3 tokens Railway sont apparus en clair dans la conversation Dev Agent :

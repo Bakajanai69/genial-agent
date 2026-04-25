@@ -66,13 +66,17 @@ from genial_agent.guardrails.token_budget import TokenBudget
 def test_caps_single_source_of_truth() -> None:
     """Les constantes S05 figent les valeurs produit (cahier §5.3, §14.3).
 
-    Bumps S08 review post test live U3 (cf. notes S08 §D + review S08
-    §B1) : ``MAX_TOOL_CALLS_PER_TURN`` 5→7 et ``MAX_TOKENS_PER_SESSION``
-    50_000→80_000 pour permettre à U3 (Carrefour vs Casino sur 3 ans)
-    de passer robustement sans hit du cap. ``WALL_CLOCK_S`` reste 15s.
+    Bumps S08 review post tests live U3 :
+
+    - ``MAX_TOOL_CALLS_PER_TURN`` 5→7 (cf. notes S08 §D + review S08 §B1)
+    - ``MAX_TOKENS_PER_SESSION`` 50_000→80_000 (idem)
+    - ``WALL_CLOCK_S`` 15→30 (review S08 §B1bis : smoke U3 webapp prod
+      cancellait Sonnet en plein streaming après 4 tool calls valides ;
+      30 s reste un filet de sécurité utile sans confondre "agent
+      stuck" et "synthèse U3 légitime sur 25 K tokens de bilans").
     """
     assert MAX_TOOL_CALLS_PER_TURN == 7
-    assert WALL_CLOCK_S == 15
+    assert WALL_CLOCK_S == 30
     assert MAX_TOKENS_PER_SESSION == 80_000
 
 

@@ -26,13 +26,20 @@ def _ensure_mounted() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
-def _scrub_railway_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Garantie déterministe : aucun marqueur Railway runtime n'est posé
-    pendant les tests par défaut. Sinon, le ``stats`` handler bascule en
-    mode "prod sans STATS_TOKEN → 503" (review S08 §B2) et casse
-    silencieusement les tests qui supposent le mode dev. Les tests qui
-    veulent simuler la prod re-posent ces vars explicitement via
-    ``monkeypatch.setenv``.
+def _scrub_routes_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Garantie déterministe :
+
+    - Aucun marqueur Railway runtime n'est posé pendant les tests par
+      défaut. Sinon, le ``stats`` handler bascule en mode "prod sans
+      STATS_TOKEN → 503" (review S08 §B2) et casse silencieusement les
+      tests qui supposent le mode dev.
+    - ``STATS_TOKEN`` est explicitement supprimé. Sinon, depuis que la
+      var est dans le ``.env`` local du dev (cf. déploiement Railway
+      §B2 du 2026-04-25), python-dotenv la charge à l'import et tous
+      les tests qui supposent /stats ouvert tombent en 401.
+
+    Les tests qui veulent simuler une config prod re-posent ces vars
+    explicitement via ``monkeypatch.setenv`` après ce scrub.
     """
     for name in (
         "RAILWAY_DEPLOYMENT_ID",
@@ -41,6 +48,7 @@ def _scrub_railway_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "RAILWAY_PROJECT_NAME",
         "RAILWAY_ENVIRONMENT_NAME",
         "RAILWAY_PRIVATE_DOMAIN",
+        "STATS_TOKEN",
     ):
         monkeypatch.delenv(name, raising=False)
 

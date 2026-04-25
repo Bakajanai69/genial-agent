@@ -69,12 +69,13 @@ async def test_u3_heavy_compare_passes_without_cap_hit(
     """Régression live — U3 lourd ne doit plus hit les caps **produit**
     (tool_calls + token_budget).
 
-    Le filet ``wall_clock`` (15 s) est **monkey-patché à 60 s** ici parce
-    que l'objet du test est la régression S08 §B1 = caps **produit**, pas
-    le filet env-dependent (cf. ``caps.py`` §"Override env" + S05 review
-    §I-1 : sur WSL avec latence Anthropic global + Pappers, les 15 s
-    sont mangés en cours d'exécution Sonnet. La prod Railway EU-West
-    n'a pas ce problème — c'est un artefact dev local).
+    Le filet ``wall_clock`` (30 s par défaut depuis B1bis) est
+    **monkey-patché à 180 s** ici parce que l'objet du test est la
+    régression S08 §B1 = caps **produit**, pas le filet env-dependent
+    (cf. ``caps.py`` §"Override env" + S05 review §I-1 : sur WSL avec
+    latence Anthropic global + Pappers, même 30 s peuvent être mangés
+    en cours d'exécution Sonnet. La prod Railway EU-West n'a pas ce
+    problème — c'est un artefact dev local).
 
     Contrats durs :
 

@@ -18,9 +18,14 @@ to N``) pour que la revue remonte l'impact.
 **Override env** : ``WALL_CLOCK_S`` peut être bumpé en dev via la
 variable d'environnement ``WALL_CLOCK_S_OVERRIDE``. Cas d'usage :
 machines dont la latence Pappers + Anthropic global cumulée dépasse
-la valeur cahier (15 s) et déclenchent en permanence des escalades
+la valeur cahier et déclenchent en permanence des escalades
 ``cap_wall_clock`` sur les tests live (cf. review S05 §I-1).
-La valeur de prod (Railway EU-West) reste 15 s par défaut.
+
+**Bump 15 s → 30 s** (review S08 §B1bis, post smoke webapp prod) :
+le cap initial 15 s coupait Sonnet en plein streaming sur U3 (lourd,
+~25 K tokens de bilans à synthétiser). Cf. notes S08 §D2 pour les
+mesures de timing et la justification produit (un cap dur reste
+opportun, mais 15 s confond "agent stuck" et "réponse U3 légitime").
 """
 
 from __future__ import annotations
@@ -41,11 +46,19 @@ MAX_TOOL_CALLS_PER_TURN = 7
 
 # Wall-clock cap par turn. Lu une seule fois au module-load via env :
 # si ``WALL_CLOCK_S_OVERRIDE`` est défini et parse en int positif, il
-# remplace la valeur cahier. Sinon défaut 15 s. Lecture unique pour
+# remplace la valeur cahier. Sinon défaut 30 s. Lecture unique pour
 # garder le contrat ``routing.py`` (bind local du symbole importé) —
 # si on a besoin de scrubber dynamiquement en test, on monkey-patch
 # ``routing.WALL_CLOCK_S`` directement.
-def _resolve_wall_clock_s(default: int = 15) -> int:
+#
+# Bump 15 → 30 s post-deploy (review S08 §B1bis) : le smoke U3 webapp
+# montrait Sonnet cancellé en plein streaming alors qu'il avait déjà
+# fait 4 tool calls valides (sirenisateur×2 ‖ comptes-entreprise×2).
+# 15 s confondait "agent stuck" (à juste titre cap'er) et "réponse
+# légitime sur 25 K tokens de bilans" (à laisser finir). 30 s reste
+# bounded enough pour un filet de sécurité (un agent réellement bloqué
+# ne pondrait pas 4 tool_use en 15 s) tout en couvrant l'UX U3.
+def _resolve_wall_clock_s(default: int = 30) -> int:
     override = os.getenv("WALL_CLOCK_S_OVERRIDE")
     if not override:
         return default
