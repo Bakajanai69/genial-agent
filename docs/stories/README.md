@@ -212,8 +212,8 @@ opérationnelles.
 | S05 | [Garde-fous 6 couches](./S05-guardrails.md) | 🟡 en cours (dev done) | S03 | S06 |
 | S06 | [UI Chainlit](./S06-chainlit-ui.md) | 🟡 en cours (dev done) | S03 | S05 |
 | S07 | [Observabilité + healthcheck](./S07-observability.md) | 🟡 en cours (dev done) | S01, S03 | S08 |
-| S08 | [Déploiement Railway](./S08-deployment.md) | 🟡 en cours (dev done) | S01, S07 | S07 |
-| S09 | [Polish : README, EVALUATION, Loom](./S09-polish.md) | ⬜ à faire | S04, S05, S06, S08 | — |
+| S08 | [Déploiement Railway](./S08-deployment.md) | ✅ approved | S01, S07 | S07 |
+| S09 | [Polish : README, EVALUATION, Loom](./S09-polish.md) | 🟡 en cours (dev done) | S04, S05, S06, S08 | — |
 | S10 | [🎯 Stretch : brief vocal ElevenLabs](./S10-voice-brief.md) | ⬜ bloqué (gating) | S09 | — |
 
 **Légende** : ⬜ à faire · 🟡 en cours · ✅ approuvée · ⏸ bloquée
