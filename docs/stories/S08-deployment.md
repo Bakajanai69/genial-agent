@@ -1264,11 +1264,16 @@ documentés en commentaires dans `.env.example` :
 
 ```bash
 RAILWAY_API_TOKEN=<account-scoped, dropdown "No workspace" à la création>
-RAILWAY_PROJECT_ID=b7c9ba07-9381-4f6f-8ff4-1fb388c08cde
-RAILWAY_SERVICE_ID=5345b27d-4377-4e1b-8eda-2d1f50e9cf46
-RAILWAY_ENVIRONMENT_ID=ad05f291-c453-4cee-a029-03487a62c5bf
+RAILWAY_PROJECT_ID=<uuid-project>
+RAILWAY_SERVICE_ID=<uuid-service>
+RAILWAY_ENVIRONMENT_ID=<uuid-environment>
 RAILWAY_PUBLIC_DOMAIN=genial-agent-production.up.railway.app
 ```
+
+> ⚠️ **S08 review §I2** — les UUIDs réels ont été retirés des fichiers
+> committés (defense-in-depth : combinés à un token leak, ils donnent
+> l'attaquant une cible directe). Stocker dans `.env` (gitignoré) ou
+> récupérer à la volée via l'introspection GraphQL Railway.
 
 > ⚠️ Le projet Railway s'appelle **`discerning-perfection`** (nom
 > auto-généré). Le **service** dans ce projet s'appelle `genial-agent`

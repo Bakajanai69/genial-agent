@@ -27,8 +27,21 @@ def test_railway_json_exists() -> None:
 
 
 def test_schema_url_pinned() -> None:
+    """Q8 review S08 : Railway expose le schéma sous deux URLs canoniques.
+    ``https://railway.com/railway.schema.json`` (court, redirige 301)
+    et ``https://backboard.railway.app/railway.schema.json`` (cible
+    finale du redirect). Les deux sont valides — on accepte n'importe
+    laquelle pour ne pas flaker si Railway change le redirect.
+    """
     cfg = _load()
-    assert cfg["$schema"] == "https://railway.com/railway.schema.json"
+    accepted = {
+        "https://railway.com/railway.schema.json",
+        "https://backboard.railway.app/railway.schema.json",
+    }
+    assert cfg["$schema"] in accepted, (
+        f"$schema doit pointer sur l'un des canoniques Railway 2026 : {accepted}, "
+        f"reçu : {cfg['$schema']!r}."
+    )
 
 
 def test_dockerfile_builder() -> None:

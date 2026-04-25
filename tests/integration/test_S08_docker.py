@@ -28,6 +28,11 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 IMAGE_TAG = "genial-agent:test-S08"
 HOST_PORT = 8765
 
+# Q2 review S08 : un Docker daemon qui hang ferait freezer pytest
+# indéfiniment. On borne explicitement les sous-process via timeout.
+_BUILD_TIMEOUT_S = 600  # 10 min — image neuve sur cold cache
+_RUN_TIMEOUT_S = 30  # docker run -d retourne presque instantanément
+
 
 def _docker_available() -> bool:
     return shutil.which("docker") is not None
@@ -48,6 +53,7 @@ def docker_container():
         ["docker", "build", "-t", IMAGE_TAG, "."],
         check=True,
         cwd=str(REPO_ROOT),
+        timeout=_BUILD_TIMEOUT_S,
     )
 
     cid = subprocess.check_output(
@@ -69,6 +75,7 @@ def docker_container():
             IMAGE_TAG,
         ],
         text=True,
+        timeout=_RUN_TIMEOUT_S,
     ).strip()
 
     deadline = time.monotonic() + 30

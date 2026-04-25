@@ -65,13 +65,42 @@ async def health(request: Request) -> JSONResponse:  # noqa: ARG001 — handler 
 
 _BEARER_PREFIX = "Bearer "
 
+# Marqueurs **runtime-only** posés par la plateforme Railway dans le
+# container du service en exécution. Ne PAS lister ici les vars que les
+# devs stockent typiquement dans leur ``.env`` local pour requêter la
+# GraphQL API Railway (``RAILWAY_PROJECT_ID``, ``RAILWAY_SERVICE_ID``,
+# ``RAILWAY_ENVIRONMENT_ID``, ``RAILWAY_API_TOKEN``,
+# ``RAILWAY_PUBLIC_DOMAIN``) — sinon faux-positif "on est en prod" sur
+# tout poste de dev. On retient les variantes ``_NAME`` (humaines, ne
+# servent à rien hors runtime) + ``RAILWAY_DEPLOYMENT_ID`` /
+# ``RAILWAY_REPLICA_ID`` (per-instance, jamais en .env). La présence
+# d'un seul suffit (la plateforme en injecte toujours plusieurs en
+# parallèle).
+_RAILWAY_RUNTIME_MARKERS = (
+    "RAILWAY_DEPLOYMENT_ID",
+    "RAILWAY_REPLICA_ID",
+    "RAILWAY_SERVICE_NAME",
+    "RAILWAY_PROJECT_NAME",
+    "RAILWAY_ENVIRONMENT_NAME",
+    "RAILWAY_PRIVATE_DOMAIN",
+)
+
+
+def _is_running_on_railway() -> bool:
+    return any(os.getenv(name) for name in _RAILWAY_RUNTIME_MARKERS)
+
 
 async def stats(request: Request) -> JSONResponse:
-    """Compteurs cumulatifs. Optionnellement protégé par ``STATS_TOKEN``.
+    """Compteurs cumulatifs. Auth obligatoire en prod Railway.
 
-    - ``STATS_TOKEN`` non défini → endpoint ouvert (choix MVP démo, la
-      surface d'attaque est minime — compteurs anonymisés).
-    - ``STATS_TOKEN`` défini → ``Authorization: Bearer <token>`` requis.
+    Politique (review S08 §B2 — durcie suite à la review post-deploy) :
+
+    - **Prod Railway** (au moins un ``RAILWAY_*`` env var posé par la
+      plateforme) : ``STATS_TOKEN`` obligatoire. Absent → 503 explicite,
+      pas de fuite des compteurs sur l'URL publique.
+    - **Local dev** (aucun marqueur Railway) : si ``STATS_TOKEN`` est
+      défini → Bearer requis ; sinon endpoint ouvert (DX simple,
+      ``curl localhost:8000/stats``).
 
     Comparaison **timing-safe** via ``hmac.compare_digest`` (review B3) :
     bonne pratique OWASP pour tout secret comparé à une entrée user,
@@ -79,6 +108,23 @@ async def stats(request: Request) -> JSONResponse:
     un signal de qualité enterprise (Cegid / CA, cf. cahier §14).
     """
     token = os.getenv("STATS_TOKEN")
+
+    if _is_running_on_railway() and not token:
+        # Refus explicite plutôt que silently servir : un /stats ouvert
+        # sur l'URL publique fuiterait volumétrie + coût Anthropic +
+        # crédits Pappers résiduels (signal de mode dégradé exploitable).
+        return JSONResponse(
+            {
+                "error": "stats_token_required_in_production",
+                "hint": (
+                    "Set STATS_TOKEN env var on the Railway service "
+                    '(generate via: python -c "import secrets; '
+                    'print(secrets.token_urlsafe(32))").'
+                ),
+            },
+            status_code=503,
+        )
+
     if token:
         auth = request.headers.get("authorization", "")
         if not auth.startswith(_BEARER_PREFIX):

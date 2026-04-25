@@ -18,9 +18,13 @@ Tout appel réseau doit être testé contre les APIs réelles.
 
 ### Décisions de cohérence (à appliquer par toutes les stories)
 
-1. **Cap tool calls par tour = 5** (conformément à §5.3 et §14.3 C4 du
-   cahier). §4 mentionne 10 — c'est une erreur à corriger dans le
-   cahier au passage. Les stories figent **5** (`guardrails/caps.py`).
+1. **Cap tool calls par tour = 7** (figé dans `guardrails/caps.py` —
+   single source of truth ; ré-aligné §4, §5.3 et §14.3 C4 du cahier).
+   Valeur révisée de 5 à 7 après le smoke test U3 sur l'URL Railway
+   (cf. notes S08 §D + review S08 §B1) : 5 ne tolérait pas une
+   inefficacité de tool selection en U3 (Carrefour vs Casino), 7
+   conserve la philosophie cap dur tout en laissant U3 + 1 follow-up
+   passer robustement.
 2. **Tool schemas** : unique point d'entrée
    `mcp_pappers.to_anthropic_schema(tools)` (S02). Consommé par S03.
 3. **Stats** : les compteurs sont instrumentés au call-site (S07 liste

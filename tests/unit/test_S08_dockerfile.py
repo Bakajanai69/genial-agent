@@ -66,17 +66,37 @@ def test_healthcheck_has_start_period() -> None:
 
 
 def test_no_hardcoded_secret() -> None:
-    """Aucune clé API ne doit fuiter via ENV/ARG dans l'image."""
+    """Aucune clé API ne doit fuiter via ``ENV`` ou ``ARG`` dans l'image.
+
+    Q3 review S08 : la version originale faisait un grep brut
+    (``"ANTHROPIC_API_KEY=" not in content``) qui rejetait même les
+    commentaires défensifs (ex : ``# do not set ANTHROPIC_API_KEY=…``).
+    On regex-match maintenant uniquement les vraies instructions
+    ``ENV`` ou ``ARG`` qui assignent une valeur — un commentaire
+    documentaire passe.
+    """
     content = _read()
-    forbidden = [
-        "ANTHROPIC_API_KEY=",
-        "PAPPERS_API_KEY=",
-        "ELEVENLABS_API_KEY=",
-        "STATS_TOKEN=",
-    ]
-    # On accepte ENV PORT=… et ARG PYTHON_VERSION=… (pas de secret).
-    for pat in forbidden:
-        assert pat not in content, f"Secret hardcodé détecté : {pat!r}"
+    # ``(ENV|ARG)`` au début d'une ligne (ignorant les espaces) suivi
+    # d'un nom de var sensible avec ``=<valeur>`` (=… non vide).
+    secret_names = (
+        "ANTHROPIC_API_KEY",
+        "PAPPERS_API_KEY",
+        "ELEVENLABS_API_KEY",
+        "STATS_TOKEN",
+        "RAILWAY_API_TOKEN",
+    )
+    for name in secret_names:
+        # ENV NAME=value | ARG NAME=value | ENV NAME value | ARG NAME value
+        bad_pattern = re.compile(
+            rf"^\s*(ENV|ARG)\s+{re.escape(name)}\s*[=\s]\s*\S+",
+            re.MULTILINE,
+        )
+        match = bad_pattern.search(content)
+        assert match is None, (
+            f"Secret hardcodé détecté : {match.group(0)!r}. "
+            f"Les valeurs de {name} doivent venir des Variables Railway, "
+            "pas du Dockerfile."
+        )
 
 
 def test_chainlit_config_copied() -> None:
@@ -92,25 +112,43 @@ def test_dockerignore_exists() -> None:
 
 
 def test_dockerignore_excludes_secrets() -> None:
+    """Q4 review S08 : couvrir aussi les variantes ``.env.production``,
+    ``.env.local`` (matchées par ``.env.*``) sinon une régression silencieuse
+    pourrait embarquer des secrets dev/staging dans l'image."""
     content = DOCKERIGNORE.read_text(encoding="utf-8")
-    assert ".env" in content
-    assert ".venv/" in content
-    assert ".git/" in content
+    lines = [ln.strip() for ln in content.splitlines() if ln.strip() and not ln.startswith("#")]
+    assert ".env" in lines, ".dockerignore doit exclure .env (secret runtime)."
+    assert ".env.*" in lines, (
+        ".dockerignore doit exclure .env.* (couvre .env.production, .env.local, etc.)."
+    )
+    assert ".venv/" in lines
+    assert ".git/" in lines
 
 
 def test_dockerignore_keeps_chainlit_config() -> None:
-    """Régression review S08 : .chainlit/ ne doit pas être exclu en bloc.
-    Sinon Chainlit tourne en prod avec ses défauts (allow_origins, MCP
-    client-side enabled, spontaneous file upload), perte des hardenings
-    S06. On vérifie que la ligne d'exclusion est bien sur un sous-path
-    (artefacts runtime), pas sur le répertoire entier."""
+    """Régression review S08 : ``.chainlit/`` ne doit pas être exclu en
+    bloc, ni ``config.toml`` ciblément. Sinon Chainlit tourne en prod
+    avec ses défauts (allow_origins, MCP client-side enabled, spontaneous
+    file upload), perte des hardenings S06.
+
+    Q5 review S08 : version durcie qui couvre aussi le pattern d'exclusion
+    ciblée ``.chainlit/config.toml`` (contournement de la version naïve).
+    """
     content = DOCKERIGNORE.read_text(encoding="utf-8")
     lines = [ln.strip() for ln in content.splitlines() if ln.strip() and not ln.startswith("#")]
-    # Aucun pattern qui matche .chainlit/ ou .chainlit/* en bloc.
-    forbidden_patterns = {".chainlit", ".chainlit/", ".chainlit/*"}
-    assert not (forbidden_patterns & set(lines)), (
-        ".dockerignore ne doit pas exclure .chainlit/ en bloc — cela embarque "
-        "config.toml et perd les hardenings S06."
+    forbidden_patterns = {
+        ".chainlit",
+        ".chainlit/",
+        ".chainlit/*",
+        ".chainlit/**",
+        ".chainlit/config.toml",
+        "**/.chainlit/config.toml",
+    }
+    intersection = forbidden_patterns & set(lines)
+    assert not intersection, (
+        f".dockerignore ne doit pas exclure {intersection} — cela perd les "
+        "hardenings S06 (allow_origins, MCP off, no upload). Lister uniquement "
+        "les sous-paths runtime (.session_files/, etc.)."
     )
 
 

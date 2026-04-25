@@ -25,6 +25,26 @@ def _ensure_mounted() -> Iterator[None]:
     yield
 
 
+@pytest.fixture(autouse=True)
+def _scrub_railway_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Garantie déterministe : aucun marqueur Railway runtime n'est posé
+    pendant les tests par défaut. Sinon, le ``stats`` handler bascule en
+    mode "prod sans STATS_TOKEN → 503" (review S08 §B2) et casse
+    silencieusement les tests qui supposent le mode dev. Les tests qui
+    veulent simuler la prod re-posent ces vars explicitement via
+    ``monkeypatch.setenv``.
+    """
+    for name in (
+        "RAILWAY_DEPLOYMENT_ID",
+        "RAILWAY_REPLICA_ID",
+        "RAILWAY_SERVICE_NAME",
+        "RAILWAY_PROJECT_NAME",
+        "RAILWAY_ENVIRONMENT_NAME",
+        "RAILWAY_PRIVATE_DOMAIN",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
 @pytest.fixture
 def client() -> TestClient:
     from chainlit.server import app as cl_app
@@ -224,6 +244,93 @@ def test_health_times_out_when_mcp_hangs(
     # Marge généreuse pour ne pas flaker selon la charge CI.
     assert elapsed < 1.0, (
         f"/health a mis {elapsed:.2f}s alors que le timeout est 0.05s → régression M3"
+    )
+
+
+def test_stats_503_in_prod_railway_without_token(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Régression S08 §B2 : sur Railway, ``/stats`` doit refuser de servir
+    si ``STATS_TOKEN`` n'est pas configuré. Sinon volumétrie + coût +
+    crédits Pappers résiduels fuitent sur l'URL publique.
+    """
+    monkeypatch.delenv("STATS_TOKEN", raising=False)
+    monkeypatch.setenv("RAILWAY_DEPLOYMENT_ID", "dep_xxx_runtime_only")
+
+    r = client.get("/stats")
+    assert r.status_code == 503
+    body = r.json()
+    assert body["error"] == "stats_token_required_in_production"
+    # Pas de fuite de compteurs dans la réponse d'erreur.
+    assert "total_turns" not in body
+    assert "anthropic_input_tokens" not in body
+
+
+def test_stats_serves_in_prod_railway_with_valid_token(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Régression S08 §B2 : sur Railway avec ``STATS_TOKEN`` configuré,
+    le Bearer correct laisse passer."""
+    monkeypatch.setenv("STATS_TOKEN", "prod-secret-xyz")
+    monkeypatch.setenv("RAILWAY_ENVIRONMENT_NAME", "production")
+
+    r_no_auth = client.get("/stats")
+    assert r_no_auth.status_code == 401  # token configuré → 401, pas 503
+
+    r_ok = client.get("/stats", headers={"Authorization": "Bearer prod-secret-xyz"})
+    assert r_ok.status_code == 200
+    assert "total_turns" in r_ok.json()
+
+
+def test_stats_503_triggers_on_any_runtime_marker(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Régression S08 §B2 : la détection prod doit s'activer sur n'importe
+    lequel des marqueurs **runtime-only** Railway. Les vars ``_ID`` que
+    les devs stockent dans .env (PROJECT_ID, SERVICE_ID, etc.) ne
+    doivent PAS suffire — sinon faux-positif sur tout poste dev."""
+    monkeypatch.delenv("STATS_TOKEN", raising=False)
+
+    runtime_markers = (
+        "RAILWAY_DEPLOYMENT_ID",
+        "RAILWAY_REPLICA_ID",
+        "RAILWAY_SERVICE_NAME",
+        "RAILWAY_PROJECT_NAME",
+        "RAILWAY_ENVIRONMENT_NAME",
+        "RAILWAY_PRIVATE_DOMAIN",
+    )
+    for marker in runtime_markers:
+        for other in runtime_markers:
+            monkeypatch.delenv(other, raising=False)
+        monkeypatch.setenv(marker, "any-value")
+        r = client.get("/stats")
+        assert r.status_code == 503, f"Marker runtime {marker} doit déclencher le refus"
+
+
+def test_stats_dev_id_vars_do_not_trigger_prod_mode(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Régression S08 §B2 : les vars ``_ID`` que les devs stockent en
+    ``.env`` pour requêter la GraphQL API Railway ne doivent PAS faire
+    basculer ``/stats`` en mode prod (sinon impossible de tester /stats
+    en local sans STATS_TOKEN). On simule un poste dev qui a tout son
+    .env Railway et on vérifie que /stats reste ouvert."""
+    monkeypatch.delenv("STATS_TOKEN", raising=False)
+    # Vars typiques qu'un dev stocke pour railway.com/account API :
+    monkeypatch.setenv("RAILWAY_PROJECT_ID", "uuid-project")
+    monkeypatch.setenv("RAILWAY_SERVICE_ID", "uuid-service")
+    monkeypatch.setenv("RAILWAY_ENVIRONMENT_ID", "uuid-env")
+    monkeypatch.setenv("RAILWAY_API_TOKEN", "dev-account-token")
+    monkeypatch.setenv("RAILWAY_PUBLIC_DOMAIN", "genial-agent-production.up.railway.app")
+
+    r = client.get("/stats")
+    assert r.status_code == 200, (
+        "Les vars ID/TOKEN/PUBLIC_DOMAIN ne doivent pas faire basculer en mode prod — "
+        "elles sont fréquemment dans .env dev pour requêter la GraphQL API Railway."
     )
 
 

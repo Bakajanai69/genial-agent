@@ -20,10 +20,23 @@ persist_user_env = false
 mask_user_env = false
 
 # Authorized origins.
-# MVP : ``["*"]`` (testable depuis n'importe où). À durcir en S08 prod
-# vers le domaine Railway uniquement (``["https://<app>.up.railway.app"]``)
-# — flagué dans la review S06 pour suivi.
-allow_origins = ["*"]
+# Durci S08 review §B3 (post-deploy) : on retire le wildcard ``["*"]`` qui
+# laissait n'importe quel site malveillant iframe / proxy le chat (CSRF
+# Socket.IO, clickjacking). On liste explicitement :
+#   - le domaine Railway prod (URL publique unique) ;
+#   - les origins localhost classiques pour le dev local + smoke tests
+#     Docker (``make run`` et ``docker run -p 8000:8000``).
+# Note pratique : l'accès via proxy d'entreprise ne change PAS l'origin
+# côté navigateur (l'URL bar reste la prod), donc cette liste n'empêche
+# pas les évaluateurs derrière un proxy. Ajouter d'autres entrées ici
+# si un custom domain est configuré (cf. docs/deployment.md).
+allow_origins = [
+    "https://genial-agent-production.up.railway.app",
+    "http://localhost:8000",
+    "http://localhost:8765",
+    "http://127.0.0.1:8000",
+    "http://127.0.0.1:8765",
+]
 
 [features]
 # Process and display HTML in messages. This can be a security risk (see https://stackoverflow.com/questions/19603097/why-is-it-dangerous-to-render-user-generated-html-or-javascript)

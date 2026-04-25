@@ -104,8 +104,10 @@ L'agent doit être capable de :
   dans le panneau latéral de la démo.
 - **Sécurité** : aucune clé n'apparaît côté client, aucun log ne contient
   d'URL MCP complète.
-- **Coût maîtrisé** : cap à 10 appels MCP par tour utilisateur + cap
-  budget journalier global (cf. §17.2).
+- **Coût maîtrisé** : cap à **7** appels MCP par tour utilisateur (valeur
+  unique figée — cf. §5.3 et §14.3 C4 ; révisé de 5 à 7 après le smoke
+  test U3 sur l'URL Railway, cf. notes S08 §D) + cap budget journalier
+  global (cf. §17.2).
 - **Disponibilité démo** : 100 % sur le week-end d'évaluation (pas de
   veille Railway → keep-alive externe, cf. §17.1).
 
@@ -167,9 +169,14 @@ Mauvais trade-off latence.
    (ex : après 2 tool calls il voit qu'il en faut 5+ de plus).
    Sonnet reprend avec le contexte complet (tool results déjà obtenus).
 
-3. **Cap dur backend** — 5 tool calls ou 15 s wall-clock sans conclusion
-   → escalade forcée côté code. Filet de sécurité au cas où Haiku sur-
-   estime ses capacités (métacognition LLM imparfaite).
+3. **Cap dur backend** — **7** tool calls ou 15 s wall-clock sans
+   conclusion → escalade forcée côté code. Filet de sécurité au cas où
+   Haiku sur-estime ses capacités (métacognition LLM imparfaite).
+   Valeur révisée de 5 à 7 après smoke test U3 sur l'URL Railway
+   (cf. notes S08 §D) : Sonnet a besoin d'au moins 4 calls pour U3
+   (2 ``sirenisateur`` + 2 ``comptes-entreprise``) ; un cap à 5
+   ne tolérait aucune inefficacité (ex : doublon SIREN). 7 garde la
+   philosophie cap dur tout en laissant une marge réaliste.
 
 L'UI affiche quel modèle a servi la réponse finale
 (badge `⚡ Haiku` ou `🧠 Sonnet`), y compris en cas d'escalade
@@ -471,7 +478,7 @@ enterprise** avec les bons patterns dès le jour 1.
 | C1 | **Input gate** — length cap 2000 chars, regex anti-injection, wrapping `<user_input>…</user_input>` | Code, 0 LLM | 30 min | ✅ |
 | C2 | **System prompt durci** — scope strict FR+Pappers, clause anti-injection, liste de refus (conseil, PII, invention) | Prompt | 20 min | ✅ |
 | C3 | **Safety native Claude** — refus embarqué dans le modèle | Gratuite | 0 | ✅ |
-| C4 | **Execution caps** — 5 tool calls max, 15 s wall-clock max, budget tokens plafonné par session | Code, 0 LLM | 20 min | ✅ |
+| C4 | **Execution caps** — 7 tool calls max, 15 s wall-clock max, budget tokens plafonné par session (80 K) | Code, 0 LLM | 20 min | ✅ |
 | C5 | **Validateur déterministe de sortie** — SIREN cités ∈ tool results, pas de pattern prescriptif, sortie Pydantic parsable | Code, 0 LLM | 45 min | ✅ |
 | C6 | **Haiku-critic async** — second Haiku en tâche de fond qui score scope / hallucination / tonalité, badge confiance en UI | LLM, async | 1 h | ✅ |
 

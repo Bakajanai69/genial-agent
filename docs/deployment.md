@@ -164,7 +164,10 @@ Bash idempotent à rejouer après chaque deploy :
 # Remplacer par l'URL retournée à l'étape 6.
 DOMAIN="genial-agent-production.up.railway.app"
 
-# 1. Health endpoint — doit afficher status:"ok" + 31 tools Pappers.
+# 1. Health endpoint — doit afficher status:"ok" + le sous-ensemble
+#    de tools Pappers retenus par notre agent (cf. cahier §5.4 : on
+#    filtre les tools utiles aux cas U1–U5 sur les 31 que Pappers
+#    expose. Compte courant : 7 — peut bouger avec S04/S10).
 curl -fsS "https://${DOMAIN}/health" | jq
 
 # Sortie attendue :
@@ -173,7 +176,7 @@ curl -fsS "https://${DOMAIN}/health" | jq
 #   "mcp": {
 #     "status": "ok",
 #     "latency_ms": 250,
-#     "tools_count": 31,
+#     "tools_count": 7,
 #     "error": null
 #   },
 #   "version": "0.1.0",
@@ -185,9 +188,10 @@ curl -fsI "https://${DOMAIN}/" | grep -E "HTTP|content-type"
 # → HTTP/2 200
 # → content-type: text/html; charset=utf-8
 
-# 3. Stats compteurs (si STATS_TOKEN configuré : ajouter
-#    -H "Authorization: Bearer <token>")
-curl -fsS "https://${DOMAIN}/stats" | jq
+# 3. Stats compteurs — en prod Railway, STATS_TOKEN est OBLIGATOIRE
+#    (review S08 §B2). Sans token, /stats répond 503
+#    {"error":"stats_token_required_in_production"}. Avec token :
+curl -fsS "https://${DOMAIN}/stats" -H "Authorization: Bearer $STATS_TOKEN" | jq
 # → JSON avec uptime_s, total_turns (0 au boot), pappers_calls_today, etc.
 ```
 
@@ -364,13 +368,19 @@ token **scope Account** (créer via [railway.com/account/tokens](https://railway
 dropdown Workspace = **« No workspace »** — un workspace token ne peut
 pas accéder aux ressources hors de son workspace).
 
-Stocker le token + IDs dans `.env` local (gitignoré) :
+Stocker le token + IDs dans `.env` local (gitignoré). Les UUIDs Project /
+Service / Environment ne sont pas des secrets en eux-mêmes (besoin du
+token pour les exploiter), mais on évite de les committer publiquement
+en defense-in-depth (review S08 §I2 — combinés à un token leak, ils
+donnent l'attaquant une cible directe). Récupérer les IDs réels via la
+console Railway (Settings → Service → Service ID) ou via l'introspection
+GraphQL ci-dessous (`me { workspaces { teams { projects { ... } } } }`).
 
 ```bash
-RAILWAY_API_TOKEN=<token>
-RAILWAY_PROJECT_ID=b7c9ba07-9381-4f6f-8ff4-1fb388c08cde
-RAILWAY_SERVICE_ID=5345b27d-4377-4e1b-8eda-2d1f50e9cf46
-RAILWAY_ENVIRONMENT_ID=ad05f291-c453-4cee-a029-03487a62c5bf
+RAILWAY_API_TOKEN=<token-Account-scope>
+RAILWAY_PROJECT_ID=<uuid-project>
+RAILWAY_SERVICE_ID=<uuid-service>
+RAILWAY_ENVIRONMENT_ID=<uuid-environment>
 RAILWAY_PUBLIC_DOMAIN=genial-agent-production.up.railway.app
 ```
 
@@ -428,3 +438,60 @@ Si on scale plus tard :
   avec une règle de session persistence.
 
 Pas dans le scope week-end.
+
+---
+
+## Annexe — paths filter auto-deploy (next step économie crédits)
+
+L'auto-deploy GitHub branche `claude/builder-evaluation-exercise-34Iyu`
+redéploie sur **chaque push**, y compris commits doc-only — chaque
+redeploy ping `/health` qui consomme 1 crédit Pappers (~70-90 s build
++ healthcheck).
+
+Sur 48 h de démo avec ~10 commits doc/polish (typique S09/S10), ça mange
+~10 crédits sur les 100/jour budgétés. Pas critique mais évitable.
+
+**Mitigation 2026** — Railway expose un filtre `paths` sur les
+`repoTriggers` (cf. [docs.railway.com/deploy/deployments#path-filtering](https://docs.railway.com/deploy/deployments#path-filtering)).
+À ajouter à la création du service via la mutation GraphQL
+``serviceUpdate`` :
+
+```graphql
+mutation {
+  serviceUpdate(id: "<service-id>", input: {
+    repoTriggers: [{
+      repository: "Bakajanai69/genial-agent",
+      branch: "claude/builder-evaluation-exercise-34Iyu",
+      paths: ["src/**", "Dockerfile", "railway.json", "pyproject.toml", "uv.lock", ".chainlit/config.toml", "public/**", "chainlit.md"]
+    }]
+  }) { id }
+}
+```
+
+Effets : commits sur `docs/`, `tests/`, `*.md` racine ne déclenchent plus
+de redeploy. Si on veut quand même redéployer pour tester un nouveau
+commit doc, `railway up` reste disponible.
+
+Décision week-end : pas urgent (l'overhead crédit reste sous contrôle
+avec le cap journalier 100). À implémenter en S09 si on a 5 min.
+
+---
+
+## Annexe — rotation token Railway (review S08 §I1)
+
+Trois tokens Account-scope ont été manipulés dans la conversation
+Dev Agent S08 (visibles dans le diff `docs/stories/S08-deployment.md`
+§F). Le token actif `79ca7d8c-…` reste dans `.env` local pour permettre
+aux Dev / Review Agents S09 / S10 d'auditer le déploiement.
+
+**Action utilisateur recommandée AVANT la démo** :
+
+1. [railway.com/account/tokens](https://railway.com/account/tokens) →
+   créer un nouveau token, dropdown Workspace = **« No workspace »**.
+2. Mettre à jour `RAILWAY_API_TOKEN` dans `.env` local.
+3. Révoquer les 3 anciens tokens dans la même page.
+4. Vérifier qu'aucun script externe ne dépend de l'ancien token.
+
+Pourquoi : un token Account a tous les droits (lire les vars secrets,
+redéployer, supprimer le projet). Si le `.env` fuit (backup, sync,
+screenshot), prise de contrôle complète.

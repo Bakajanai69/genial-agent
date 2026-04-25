@@ -51,9 +51,12 @@ EXPOSE 8000
 # HEALTHCHECK = info-only en local (`docker ps` montre healthy/unhealthy).
 # Railway utilise son propre healthcheck via railway.json (healthcheckPath).
 # --start-period=15s : laisse le temps au boot Chainlit + 1er ping
-# Pappers d'aboutir avant la 1ère retry.
+# Pappers d'aboutir avant la 1ère retry. À ré-évaluer si on ajoute des
+# handshakes au boot (S10 ElevenLabs).
+# Q6 review S08 : on absorbe stdout ET stderr (``2>&1``) — sans ça,
+# curl spam stderr lors d'un DNS fail / refused au démarrage.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-  CMD curl -fsS "http://localhost:${PORT:-8000}/health" >/dev/null || exit 1
+  CMD curl -fsS "http://localhost:${PORT:-8000}/health" >/dev/null 2>&1 || exit 1
 
 # Shell-form CMD : ${PORT} expansé par sh. Avec exec-form, Chainlit
 # recevrait littéralement la chaîne "${PORT}" et crasherait.
