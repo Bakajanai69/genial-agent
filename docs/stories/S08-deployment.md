@@ -1234,9 +1234,219 @@ mineurs : typos, lint, image > 400 MB à investigate, etc.).
 
 - [x] Phase 1 commitée
       (`story(S08): refine — railway.json schema 2026, multiRegionConfig Amsterdam, Dockerfile shell-form $PORT, UptimeRobot keyword`).
-- [ ] Phase 2 commitée + image build + déploiement effectué.
+- [x] Phase 2 commitée + image build + déploiement effectué
+      (`feat(S08): Dockerfile final + railway.json multiRegion + deployment docs`,
+      commit `d8c88d0` ; doc patch URL `docs(S08): URL Railway publique + annexe API + warning shared vs service vars`,
+      commit `d221ee9`).
 - [ ] Phase 3 approuvée.
-- [ ] URL publique notée dans `docs/deployment.md` ET `README.md`.
-- [ ] Ligne S08 mise à jour dans `docs/stories/README.md` → ✅.
-- [ ] Check-list "Avant S08" cochée dans `docs/stories/README.md`.
-- [ ] Push effectué sur `claude/builder-evaluation-exercise-34Iyu`.
+- [x] URL publique notée dans `docs/deployment.md` ET `README.md`
+      (https://genial-agent-production.up.railway.app).
+- [ ] Ligne S08 mise à jour dans `docs/stories/README.md` → ✅
+      (actuellement 🟡 en cours dev done, à passer ✅ post-review).
+- [ ] Check-list "Avant S08" cochée dans `docs/stories/README.md`
+      (UptimeRobot non encore configuré côté Lancelot).
+- [x] Push effectué sur `claude/builder-evaluation-exercise-34Iyu`.
+
+---
+
+## 📝 Notes post-déploiement (2026-04-25)
+
+> Section ajoutée par le Dev Agent S08 phase 2 après le déploiement
+> programmatique Railway. **Lecture obligatoire pour S09 et S10** —
+> contient des gotchas qui n'apparaissaient pas en phase 1 elicitation.
+
+### A. Déploiement programmatique via Railway GraphQL API
+
+Le déploiement initial a été automatisé via l'API publique
+`https://backboard.railway.com/graphql/v2` (pas via la console UI).
+Les IDs de ressources sont stockés dans `.env` local (gitignoré) +
+documentés en commentaires dans `.env.example` :
+
+```bash
+RAILWAY_API_TOKEN=<account-scoped, dropdown "No workspace" à la création>
+RAILWAY_PROJECT_ID=b7c9ba07-9381-4f6f-8ff4-1fb388c08cde
+RAILWAY_SERVICE_ID=5345b27d-4377-4e1b-8eda-2d1f50e9cf46
+RAILWAY_ENVIRONMENT_ID=ad05f291-c453-4cee-a029-03487a62c5bf
+RAILWAY_PUBLIC_DOMAIN=genial-agent-production.up.railway.app
+```
+
+> ⚠️ Le projet Railway s'appelle **`discerning-perfection`** (nom
+> auto-généré). Le **service** dans ce projet s'appelle `genial-agent`
+> et c'est lui qui porte le déploiement. Ne pas confondre `project.name`
+> et `service.name` dans les queries.
+
+**Snippets utiles** dans `docs/deployment.md` § « Annexe — API Railway »
+(whoami, deployments, deploymentLogs, domains). Les agents S09 / S10
+peuvent réutiliser ces snippets pour auditer un déploiement sans
+ouvrir la console UI Railway.
+
+#### A.1 Choix du token — gotcha au démarrage
+
+Trois tentatives ont été nécessaires pour avoir un token utilisable :
+
+| Tentative | Type    | Résultat                                                                  |
+| --------- | ------- | ------------------------------------------------------------------------- |
+| `d1070d66-...` | inconnu | révoqué / expiré, fail sur tous les types d'auth                     |
+| `123f2303-...` | Workspace | scope limité au workspace, **pas** d'accès aux projects via top-level |
+| `79ca7d8c-...` | **Account** | dropdown « No workspace » à la création → marche via `Authorization: Bearer` + CLI `RAILWAY_API_TOKEN=` env var |
+
+**Règle** : pour une intégration programmatique large (lister projects,
+lire vars, déclencher redeploy), il faut un **Account token** (« No
+workspace » dans le dropdown du formulaire création). Workspace token
+seul ne suffit pas — `me`, `projects(workspaceId)` et même
+`project(id)` retournent `Not Authorized`.
+
+### B. Gotcha critique — Shared vars NON héritées par les services
+
+**Symptôme** : déploiement initial `d8c88d0` avait `body.status == "ko"`
+sur `/health` avec `error: "RuntimeError"` et `latency_ms: 0`.
+
+**Diagnostic** : `RuntimeError("PAPPERS_API_KEY not set")` levé par
+`mcp_pappers._build_url()` (ligne 237 de `mcp_pappers.py`). Les vars
+existaient bien côté Railway mais au scope **shared (project-level)**,
+pas au scope **service**. Contrairement à ce qu'on pourrait penser,
+**Railway ne propage PAS automatiquement les shared vars aux services** :
+chaque service doit soit redéclarer les vars, soit poser une référence
+`${{ shared.VAR_NAME }}` qui acte explicitement la dépendance.
+
+**Fix appliqué via API** : mutation `variableCollectionUpsert` au
+scope service avec 8 vars pointant `${{ shared.X }}` :
+
+```graphql
+mutation Upsert($input: VariableCollectionUpsertInput!) {
+  variableCollectionUpsert(input: $input)
+}
+# variables.input :
+{
+  "projectId": "...", "serviceId": "...", "environmentId": "...",
+  "replace": false, "skipDeploys": false,
+  "variables": {
+    "ANTHROPIC_API_KEY": "${{ shared.ANTHROPIC_API_KEY }}",
+    "PAPPERS_API_KEY": "${{ shared.PAPPERS_API_KEY }}",
+    # ... 6 autres ...
+  }
+}
+```
+
+`skipDeploys: false` (défaut) déclenche un redeploy auto. Le redeploy
+a été SUCCESS en ~70s, `/health` est passé à `status:"ok"` avec
+`mcp.tools_count: 7`, `latency_ms: ~376ms`.
+
+**Pour S09 et S10** :
+- Si vous ajoutez une nouvelle env var (ex : feature flag, secret
+  ElevenLabs additionnel pour S10), ajoutez-la **au scope service**,
+  pas au shared. Ou pensez à poser la ref `${{ shared.VAR }}` après.
+- Le warning `pappers_healthcheck_failed` sans détails est un signal
+  faible — toujours croiser avec un `curl /health` pour avoir
+  `error_type` exact.
+
+### C. Auto-deploy GitHub vérifié end-to-end
+
+Le `repoTriggers` du service a été automatiquement câblé par Railway
+au moment de la création du projet (lien GitHub OAuth) :
+
+```json
+{
+  "repository": "Bakajanai69/genial-agent",
+  "branch": "claude/builder-evaluation-exercise-34Iyu",
+  "checkSuites": false
+}
+```
+
+Validation end-to-end (commit `d221ee9` poussé après le 1er deploy) :
+
+```
+T+0s   git push origin claude/builder-evaluation-exercise-34Iyu
+T+2s   Railway: deployment created, status=BUILDING
+T+72s  Railway: status=SUCCESS
+T+78s  curl /health → status:"ok"
+```
+
+→ Tout push sur la branche redéploie en < 90 s. **Aucune action manuelle
+nécessaire pour les commits S09 / S10**.
+
+### D. Smoke test U3 sur l'URL publique — caps trop serrés (à arbitrer S09)
+
+Premier test live de Lancelot sur l'URL publique :
+
+> *"Compare la santé financière de Carrefour et Casino sur 3 ans,
+> lequel présente le moins de risque ?"*
+
+Résultat : **double cap hit** sur 1 seul tour.
+
+```
+[warn] routing_cap_tool_calls   # 5/5 atteint
+       cap_token_budget         # 50_000 atteint
+✗ Critic confiance 30%
+   Issues: pas de données financières, comparaison incomplète,
+   recommandation implicite de risque
+```
+
+#### D.1 Trace du tour (Sonnet)
+
+5 tool calls observés en moins de 2s (parallel `tool_use` blocks) :
+
+1. `sirenisateur(Carrefour)` ✅
+2. `sirenisateur(Casino)` ✅
+3. `sirenisateur(Carrefour SA holding)` ❌ **redondant** — SIREN déjà obtenu en (1)
+4. `comptes-entreprise(Carrefour)` ✅
+5. `comptes-entreprise(Casino)` ✅ → mais ce 5ème call déclenche le cap
+
+#### D.2 Trois causes empilées
+
+**1. Stratégie sous-optimale Sonnet** : 3 appels SIREN au lieu de 2.
+Le 3ème (« Carrefour SA holding ») était redondant. Sans cette erreur,
+le tour passait à 4/5.
+
+**2. Cap `MAX_TOOL_CALLS_PER_TURN = 5` trop serré pour U3** :
+[`src/genial_agent/guardrails/caps.py:30`](../../src/genial_agent/guardrails/caps.py).
+Spec ambivalente — cahier §4 dit 10, §5.3 + §14.3 C4 disent 5
+(README "Décisions de cohérence" §1 a tranché à 5). Or §13 critères
+d'acceptation **demande** *"enchaîne au moins 4 tool calls visibles"*.
+Marge réelle = 1 call. Toute inefficacité agent = échec.
+
+**3. Cap `MAX_TOKENS_PER_SESSION = 50_000` cumulatif** :
+[`src/genial_agent/guardrails/token_budget.py`](../../src/genial_agent/guardrails/token_budget.py).
+Le tool `comptes-entreprise` retourne ~3 ans de bilans → 5-10K tokens
+par appel. Cumul rapide vers 50K dès le 1er tour U3
+(system prompt durci ~2K + schémas 7 tools ~3K + 4 tool results lourds
+~25-35K + reasoning Sonnet).
+
+#### D.3 Recommandations pour S09 (polish + adversarial)
+
+| Fix | Fichier | Effort | Impact |
+|-----|---------|--------|--------|
+| Bumper `MAX_TOOL_CALLS_PER_TURN` à **7** (entre §4=10 et §5.3=5) | `caps.py:30` | 1 ligne | Marge 2 calls pour U3, esprit cap conservé |
+| Bumper `MAX_TOKENS_PER_SESSION` à **80_000** | `caps.py:55` | 1 ligne | Permet U3 + 1 follow-up multi-turn |
+| Prompt fix anti-redondance SIREN : *"un seul `sirenisateur` par entité, ne re-cherche pas un SIREN déjà obtenu"* | system prompt agent | ~5 lignes | Élimine le call gaspillé |
+| Documenter §4 vs §5.3 dans le cahier (figer 7 ou 5, mais pas les deux) | `cahier-des-charges.md` §4 et §5.3 | 5 min | Cohérence spec |
+
+> **Décision à prendre par S09** : faut-il bumper les caps pour
+> qu'U3 passe robustement (signal "ça marche") OU garder les caps
+> serrés pour montrer les hardenings (signal "ça se défend") ?
+> Mon avis : bump à 7 calls / 80K tokens + prompt fix. Les caps
+> restent visibles dans la démo si l'évaluateur force un cas
+> extrême (T7 « dossier complet sur 50 entreprises du CAC40 »).
+
+#### D.4 Le critic a fait son job
+
+Score 30% avec issues correctement listées. C'est exactement le
+comportement attendu du C6 (Haiku-critic §14.3) : un signal rouge
+visible quand la réponse n'est pas exploitable, plutôt qu'une
+fausse confiance. **Ne pas baisser le seuil orange/rouge en S09**
+pour cacher cet échec — au contraire, on garde le critic strict et
+on fix les caps en amont.
+
+### E. État UptimeRobot
+
+Toujours **non configuré** (Lancelot doit le faire côté UI). Procédure
+inchangée dans `docs/deployment.md` §8. À cocher dans
+`docs/stories/README.md` § « Avant S08 » une fois fait.
+
+### F. Tokens partagés en chat — à révoquer
+
+3 tokens Railway sont apparus en clair dans la conversation Dev Agent :
+`d1070d66-...`, `123f2303-...`, `79ca7d8c-...`. Le dernier est dans
+`.env` local (gitignoré) pour permettre aux agents S09/S10 d'auditer.
+**Action recommandée Lancelot** : recréer un token frais Account-scope,
+mettre à jour `.env`, révoquer les anciens.
