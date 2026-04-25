@@ -119,7 +119,42 @@ async def test_validator_degraded_overrides_msg_content_with_linkified(
     )
     assert "pappers.fr/entreprise/775670417" in state.final_text
     assert state.msg.content == state.final_text
+    # ``linkify_applied`` doit être positionné — sinon le post-loop
+    # ``app.on_message`` re-linkifierait et provoquerait un double-encodage
+    # Markdown sur les SIREN déjà entourés de ``[...](...)`` (bug B1
+    # de la review S06).
+    assert state.linkify_applied is True
     state.msg.update.assert_awaited()
+
+
+async def test_critic_result_does_not_set_linkify_applied(state: TurnState) -> None:
+    """Régression bug B1 : ``critic_result`` ne doit PAS positionner
+    ``linkify_applied``. Sinon le post-loop ``app.on_message`` skipperait
+    le linkify final et les SIREN du chemin nominal (sans
+    ``validator_degraded``) resteraient en texte brut."""
+    state.msg.content = "Texte streamé avec SIREN 775670417"
+    await dispatch_event(
+        {
+            "type": "critic_result",
+            "color": "green",
+            "confidence": 0.92,
+            "scope_ok": True,
+            "hallucination_risk": "low",
+            "advisory_language": False,
+            "issues": [],
+        },
+        state,
+    )
+    # Le critic ne touche pas au flag — l'app.py post-loop devra
+    # linkifier lui-même.
+    assert state.linkify_applied is False
+    # Le SIREN n'est PAS encore linkifié (c'est le job du post-loop).
+    assert "pappers.fr" not in state.msg.content
+
+
+async def test_default_state_linkify_not_applied(state: TurnState) -> None:
+    """Sanity : un ``TurnState`` neuf a ``linkify_applied=False``."""
+    assert state.linkify_applied is False
 
 
 async def test_critic_result_appends_badge_green(state: TurnState) -> None:

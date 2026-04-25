@@ -47,6 +47,10 @@ class TurnState:
         end_reason: motif du dernier event ``end`` (cf. S03 contrat).
         input_rejected: True si le pipeline a refusé l'input (C1).
             Permet à l'appelant de skipper le post-traitement final.
+        linkify_applied: True dès que ``linkify_sirens`` a tourné sur
+            ``msg.content`` (via ``validator_degraded`` ou via le
+            post-loop ``app.on_message``). Empêche le double-encodage
+            Markdown qui surviendrait si on linkifiait deux fois.
     """
 
     msg: cl.Message
@@ -59,6 +63,7 @@ class TurnState:
     final_text: str = ""
     end_reason: str | None = None
     input_rejected: bool = False
+    linkify_applied: bool = False
 
 
 _END_HUMAN_TEXT: dict[str, str] = {
@@ -201,9 +206,13 @@ async def dispatch_event(event: dict[str, Any], state: TurnState) -> None:
     if et == "validator_degraded":
         # Override du contenu du msg principal avec le texte dégradé
         # (= réponse + disclaimers en pied). Linkify final pass ici.
+        # Set ``linkify_applied`` pour que le post-loop ``app.on_message``
+        # ne re-linkifie pas (sinon double-encodage Markdown sur les SIREN
+        # déjà entourés de ``[...](...)``).
         degraded = event.get("degraded_text") or ""
         state.final_text = linkify_sirens(degraded)
         state.msg.content = state.final_text
+        state.linkify_applied = True
         await state.msg.update()
         return
 

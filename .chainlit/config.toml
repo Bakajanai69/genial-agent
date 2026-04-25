@@ -19,7 +19,10 @@ persist_user_env = false
 # Set to true to show API keys as ***, false to show them as plain text
 mask_user_env = false
 
-# Authorized origins
+# Authorized origins.
+# MVP : ``["*"]`` (testable depuis n'importe où). À durcir en S08 prod
+# vers le domaine Railway uniquement (``["https://<app>.up.railway.app"]``)
+# — flagué dans la review S06 pour suivi.
 allow_origins = ["*"]
 
 [features]
@@ -41,8 +44,10 @@ assistant_message_autoscroll = true
 # Pas de chat profile en S06 — auto_tag est inutile.
 auto_tag_thread = false
 
-# Allow users to edit their own messages
-edit_message = true
+# Allow users to edit their own messages.
+# Disabled : on n'a pas implémenté ``@cl.on_message_edit`` côté backend
+# (S06 hors scope), un edit user déclencherait un comportement non défini.
+edit_message = false
 
 # Allow users to share threads (backend + UI). Requires an app-defined on_shared_thread_view callback.
 allow_thread_sharing = false
@@ -54,21 +59,16 @@ favorites = false
 # Add emoji reaction when message is received (requires reactions:write OAuth scope)
 reaction_on_message_received = false
 
-# Authorize users to spontaneously upload files with messages
+# Authorize users to spontaneously upload files with messages.
+# Désactivé S06 : l'agent ne traite aucun fichier. Garder ``enabled =
+# true`` afficherait un bouton "joindre un fichier" qui ne fait rien
+# (UX confuse) et ouvrirait une surface d'attaque inutile (500 Mo
+# d'upload accepté avec ``accept = ["*/*"]``).
 [features.spontaneous_file_upload]
-    enabled = true
-    # Define accepted file types using MIME types
-    # Examples:
-    # 1. For specific file types:
-    #    accept = ["image/jpeg", "image/png", "application/pdf"]
-    # 2. For all files of certain type:
-    #    accept = ["image/*", "audio/*", "video/*"]
-    # 3. For specific file extensions:
-    #    accept = { "application/octet-stream" = [".xyz", ".pdb"] }
-    # Note: Using "*/*" is not recommended as it may cause browser warnings
-    accept = ["*/*"]
-    max_files = 20
-    max_size_mb = 500
+    enabled = false
+    accept = []
+    max_files = 0
+    max_size_mb = 0
 
 [features.audio]
     # Enable audio features
@@ -76,22 +76,27 @@ reaction_on_message_received = false
     # Sample rate of the audio
     sample_rate = 24000
 
+# Chainlit-side MCP features. Notre agent appelle son **propre** MCP
+# Pappers côté serveur via ``mcp_pappers.py`` (cf. S02) — l'utilisateur
+# final ne configure aucun MCP. On désactive donc tous les sous-modes,
+# y compris le ``stdio`` qui aurait permis l'exécution arbitraire de
+# ``npx``/``uvx`` côté backend Chainlit (défense en profondeur si
+# ``features.mcp.enabled`` était re-toggle par mégarde).
 [features.mcp]
-    # Enable Model Context Protocol (MCP) features
     enabled = false
 
 [features.mcp.sse]
-    enabled = true
+    enabled = false
 
 [features.mcp.streamable-http]
-    enabled = true
+    enabled = false
 
 [features.mcp.stdio]
-    enabled = true
-    # Only the executables in the allow list can be used for MCP stdio server.
-    # Only need the base name of the executable, e.g. "npx", not "/usr/bin/npx".
-    # Please don't comment this line for now, we need it to parse the executable name.
-    allowed_executables = [ "npx", "uvx" ]
+    enabled = false
+    # ``allowed_executables`` est requis (parsing Chainlit) — on le garde
+    # vide pour neutraliser toute exécution même si l'utilisateur (ou un
+    # bug Chainlit) re-active ``features.mcp.stdio.enabled`` à chaud.
+    allowed_executables = []
 
 [UI]
 # Name of the assistant.
@@ -99,10 +104,12 @@ name = "Agent entreprises FR · via Pappers"
 
 default_theme = "dark"
 
-# Force le rendu FR pour tous les évaluateurs (Fabien probable en FR-FR)
-# — Chainlit fallback en-US si la traduction est partielle, mais le
-# contenu de nos messages est déjà 100 % FR.
-language = "fr-FR"
+# Locale UI : on laisse Chainlit autodétecter depuis le navigateur.
+# Forcer ``language = "fr-FR"`` sans peupler ``.chainlit/translations/``
+# fait fallback en-US sur les libellés Chainlit (boutons "Send", "New
+# chat") avec un avertissement console — pire UX qu'un autodétect.
+# Le contenu de nos messages est déjà 100 % FR (system prompt + UI S06).
+# language = "fr-FR"
 
 # layout = "wide"
 
@@ -114,8 +121,10 @@ language = "fr-FR"
 # Default state of chat settings sidebar when location is "sidebar"
 # default_chat_settings_open = false
 
-# Whether to prompt user confirmation on clicking 'New Chat'
-confirm_new_chat = true
+# Whether to prompt user confirmation on clicking 'New Chat'.
+# Désactivé pour la démo : Fabien doit pouvoir enchaîner les starters
+# sans popup intempestive entre chaque scénario de test.
+confirm_new_chat = false
 
 # Description of the assistant. This is used for HTML tags.
 # description = ""
@@ -152,11 +161,11 @@ alert_style = "classic"
 # Specify a custom meta image url.
 # custom_meta_image_url = "https://chainlit-cloud.s3.eu-west-3.amazonaws.com/logo/chainlit_banner.png"
 
-# Load assistant logo directly from URL.
-logo_file_url = ""
-
-# Load assistant avatar image directly from URL.
-default_avatar_file_url = ""
+# Load assistant logo / avatar directly from URL.
+# Strings vides peuvent déclencher un fetch sur ``""`` côté frontend —
+# on commente plutôt qu'on laisse vide.
+# logo_file_url = ""
+# default_avatar_file_url = ""
 
 # Avatar size in pixels (default: 20).
 # avatar_size = 20

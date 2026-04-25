@@ -18,6 +18,9 @@ plutôt que par redéfinition du décorateur.
 
 from __future__ import annotations
 
+import asyncio
+import uuid
+
 import chainlit as cl
 import structlog
 
@@ -34,6 +37,45 @@ from genial_agent.ui.post_process import linkify_sirens, model_badge
 from genial_agent.ui.starters import STARTERS
 
 logger = structlog.get_logger(__name__)
+
+# Cap dur sur le healthcheck Pappers au boot d'un chat. Au-delà, on
+# bascule en mode "MCP KO" visible plutôt que de faire poireauter
+# l'évaluateur sur un on_chat_start qui ne se termine jamais.
+_HEALTHCHECK_TIMEOUT_S: float = 3.0
+
+
+def _resolve_session_id() -> str:
+    """Source de vérité du ``session_id`` côté UI.
+
+    Ordre de priorité :
+
+    1. ``cl.context.session.id`` — l'API publique stable de Chainlit.
+    2. ``cl.user_session.get("id")`` — clé interne posée par Chainlit
+       sur certaines versions, fallback historique.
+    3. ``uuid.uuid4().hex`` mémorisé dans la session — garantit
+       l'unicité par session si Chainlit n'expose rien (jamais observé
+       sur 2.11.1, mais on refuse de partager un ``"unknown"`` global
+       qui mêlerait les budgets / locks de toutes les sessions).
+    """
+    try:
+        ctx_session = cl.context.session
+        candidate = getattr(ctx_session, "id", None)
+        if isinstance(candidate, str) and candidate:
+            return candidate
+    except Exception as exc:  # noqa: BLE001 — best-effort, fallback explicite ci-dessous
+        logger.debug("ui_session_id_ctx_unavailable", error_type=type(exc).__name__)
+
+    candidate = cl.user_session.get("id")
+    if isinstance(candidate, str) and candidate:
+        return candidate
+
+    candidate = cl.user_session.get("_session_id_fallback")
+    if isinstance(candidate, str) and candidate:
+        return candidate
+    fallback = uuid.uuid4().hex
+    cl.user_session.set("_session_id_fallback", fallback)
+    logger.warning("ui_session_id_fallback_uuid", fallback=fallback)
+    return fallback
 
 
 @cl.set_starters
@@ -54,7 +96,28 @@ async def on_chat_start() -> None:
     cl.user_session.set("state", ConversationState())
     cl.user_session.set("entity_banner_msg", None)
 
-    health = await mcp_pappers.healthcheck()
+    # Healthcheck Pappers borné dur (cf. ``_HEALTHCHECK_TIMEOUT_S``).
+    # ``mcp_pappers.healthcheck`` retourne déjà ``status="ko"`` sur
+    # exception, mais ne garantit pas un timeout court sur
+    # ``list_available_tools`` — on plafonne ici pour ne jamais bloquer
+    # le boot d'un chat.
+    try:
+        health = await asyncio.wait_for(
+            mcp_pappers.healthcheck(),
+            timeout=_HEALTHCHECK_TIMEOUT_S,
+        )
+    except TimeoutError:
+        logger.warning(
+            "ui_pappers_health_timeout",
+            timeout_s=_HEALTHCHECK_TIMEOUT_S,
+        )
+        health = {
+            "status": "ko",
+            "latency_ms": int(_HEALTHCHECK_TIMEOUT_S * 1000),
+            "tools_count": 0,
+            "error": "TimeoutError",
+        }
+
     if health["status"] != "ok":
         logger.warning(
             "ui_pappers_health_ko",
@@ -80,7 +143,7 @@ async def on_message(message: cl.Message) -> None:
     la bannière entité.
     """
     state: ConversationState = cl.user_session.get("state") or ConversationState()
-    session_id: str = cl.user_session.get("id") or "unknown"
+    session_id: str = _resolve_session_id()
 
     # Bulle agent vide, sera remplie par stream_token / update.
     msg = cl.Message(content="", author="Agent")
@@ -99,6 +162,13 @@ async def on_message(message: cl.Message) -> None:
         # pendant un stream peut laisser le lock détenu et bloquer le
         # prochain ``run_turn`` de la même session.
         await turn_gen.aclose()
+        # Drain des ``cl.Step`` orphelines : si le pipeline a coupé entre
+        # un ``tool_use`` et son ``tool_result`` (cap_wall_clock,
+        # cap_tool_calls_per_turn pendant l'exécution d'un outil,
+        # exception remontée du dispatcher…), une step reste ouverte
+        # côté UI = spinner infini visible pour l'évaluateur. On force
+        # leur sortie de context manager ici.
+        await _drain_orphan_steps(turn_state)
 
     # Si le pipeline a refusé l'input (C1), la bulle agent a déjà été
     # supprimée par le dispatcher → on n'ajoute rien (ni badge, ni
@@ -106,11 +176,17 @@ async def on_message(message: cl.Message) -> None:
     if turn_state.input_rejected:
         return
 
-    # Final pass linkify SIREN si ``validator_degraded`` n'a pas tourné
-    # (réponse jugée propre par C5 → on linkifie nous-mêmes).
-    if not turn_state.final_text:
-        turn_state.final_text = linkify_sirens(msg.content or "")
-        msg.content = turn_state.final_text
+    # Final pass linkify SIREN. ``linkify_applied`` est posé par le
+    # dispatcher si ``validator_degraded`` a tourné (déjà linkifié) ;
+    # sinon (chemin nominal sans hallucination détectée) on linkifie
+    # ici pour garantir le critère d'acceptation "SIREN cliquables".
+    # Bug B1 review : sans ce passage, un turn sans validator_degraded
+    # mais avec ``critic_result`` (qui pose ``final_text``) sortait
+    # du linkify final.
+    if not turn_state.linkify_applied:
+        msg.content = linkify_sirens(msg.content or "")
+        turn_state.linkify_applied = True
+        turn_state.final_text = msg.content
         await msg.update()
 
     # Badge modèle final + sub-line confiance critic (déjà ajouté par
@@ -131,6 +207,31 @@ async def on_message(message: cl.Message) -> None:
     await _update_entity_banner(entity)
 
 
+async def _drain_orphan_steps(turn_state: TurnState) -> None:
+    """Force l'``__aexit__`` de toutes les ``cl.Step`` encore ouvertes.
+
+    Idempotent : on consomme ``step_by_id`` et on tolère qu'``__aexit__``
+    lève (Chainlit a parfois fermé le WebSocket avant ce moment) — on
+    log et on continue plutôt que de propager l'exception au turn.
+    """
+    if not turn_state.step_by_id:
+        return
+    orphans = list(turn_state.step_by_id.items())
+    turn_state.step_by_id.clear()
+    for tu_id, step in orphans:
+        try:
+            # Marque la step comme erreur pour signaler visuellement
+            # qu'elle n'a pas eu de ``tool_result`` (cap, abort).
+            step.is_error = True
+            await step.__aexit__(None, None, None)
+        except Exception as exc:  # noqa: BLE001 — best-effort cleanup
+            logger.warning(
+                "ui_orphan_step_close_failed",
+                tool_use_id=tu_id,
+                error_type=type(exc).__name__,
+            )
+
+
 @cl.on_chat_end
 async def on_chat_end() -> None:
     """Cleanup à la fermeture du chat.
@@ -139,10 +240,14 @@ async def on_chat_end() -> None:
     rien à annuler. On libère uniquement le slot de token budget pour
     cette session pour éviter que le ``defaultdict`` interne ne grossisse
     indéfiniment sur un serveur long-lived.
+
+    On résout le ``session_id`` via le même chemin que ``on_message``
+    (``_resolve_session_id``), sinon un fallback UUID posé en cours de
+    conversation ne serait jamais nettoyé (mismatch de clé entre
+    ``budget.add(session_id)`` et ``budget.reset(session_id)``).
     """
-    session_id = cl.user_session.get("id")
-    if session_id:
-        await budget.reset(session_id)
+    session_id = _resolve_session_id()
+    await budget.reset(session_id)
 
 
 async def _update_entity_banner(entity: ActiveEntity | None) -> None:
