@@ -42,7 +42,8 @@ Copier `.env.example` → `.env` et remplir les clés API
 
 L'agent tourne en prod sur **Railway EU-West (Amsterdam)** :
 
-🌐 **URL publique** : _à compléter post-deploy (cf. `docs/deployment.md` §6)._
+🌐 **URL publique** : <https://genial-agent-production.up.railway.app>
+(`/health` → JSON status:ok · `/stats` → compteurs S07 · `/` → UI Chainlit)
 
 Config-as-code dans `railway.json` (région, healthcheck, restart).
 Procédure complète + troubleshooting dans

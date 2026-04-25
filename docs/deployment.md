@@ -135,11 +135,16 @@ Le déploiement est marqué `SUCCESS` une fois que le `/health` répond
 
 Dans le service Railway → **Settings → Networking → Generate Domain**.
 
-Railway provisionne une URL `*.up.railway.app`, par exemple :
+Railway provisionne une URL `*.up.railway.app`. Pour le projet courant :
 
 ```
 https://genial-agent-production.up.railway.app
 ```
+
+(provisionnée 2026-04-25 via la mutation GraphQL `serviceDomainCreate`
+en pointant le `targetPort: 8080` — port injecté par Railway au runtime,
+expansé par notre shell-form CMD `${PORT:-8000}`. Cf. annexe « API
+Railway » plus bas pour le snippet curl exact.)
 
 **Noter cette URL** dans :
 
@@ -345,6 +350,66 @@ railway up
 > Pas le mode normal — l'auto-deploy GitHub trace les builds dans
 > l'historique commit-by-commit, ce qui est plus traceable. À utiliser
 > en plan B uniquement.
+
+---
+
+## Annexe — API Railway (introspection programmatique)
+
+Pour les Dev / Review Agents qui doivent auditer le déploiement sans
+ouvrir le dashboard Railway, on peut introspecter via la **GraphQL API
+publique** : `https://backboard.railway.com/graphql/v2`.
+
+Authentification : `Authorization: Bearer <RAILWAY_API_TOKEN>` avec un
+token **scope Account** (créer via [railway.com/account/tokens](https://railway.com/account/tokens),
+dropdown Workspace = **« No workspace »** — un workspace token ne peut
+pas accéder aux ressources hors de son workspace).
+
+Stocker le token + IDs dans `.env` local (gitignoré) :
+
+```bash
+RAILWAY_API_TOKEN=<token>
+RAILWAY_PROJECT_ID=b7c9ba07-9381-4f6f-8ff4-1fb388c08cde
+RAILWAY_SERVICE_ID=5345b27d-4377-4e1b-8eda-2d1f50e9cf46
+RAILWAY_ENVIRONMENT_ID=ad05f291-c453-4cee-a029-03487a62c5bf
+RAILWAY_PUBLIC_DOMAIN=genial-agent-production.up.railway.app
+```
+
+Snippets utiles :
+
+```bash
+# Whoami
+curl -sS -X POST https://backboard.railway.com/graphql/v2 \
+  -H "Authorization: Bearer $RAILWAY_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"{ me { name email } }"}'
+
+# Statut du dernier déploiement
+curl -sS -X POST https://backboard.railway.com/graphql/v2 \
+  -H "Authorization: Bearer $RAILWAY_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"query\":\"{ deployments(input: { projectId: \\\"$RAILWAY_PROJECT_ID\\\", serviceId: \\\"$RAILWAY_SERVICE_ID\\\", environmentId: \\\"$RAILWAY_ENVIRONMENT_ID\\\" }, first: 1) { edges { node { id status meta } } } }\"}"
+
+# Logs runtime
+curl -sS -X POST https://backboard.railway.com/graphql/v2 \
+  -H "Authorization: Bearer $RAILWAY_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"query\":\"query { deploymentLogs(deploymentId: \\\"<DEP_ID>\\\", limit: 200) { message timestamp severity } }\"}"
+
+# Domaines
+curl -sS -X POST https://backboard.railway.com/graphql/v2 \
+  -H "Authorization: Bearer $RAILWAY_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"query\":\"{ domains(serviceId: \\\"$RAILWAY_SERVICE_ID\\\", environmentId: \\\"$RAILWAY_ENVIRONMENT_ID\\\", projectId: \\\"$RAILWAY_PROJECT_ID\\\") { serviceDomains { domain targetPort } customDomains { domain } } }\"}"
+```
+
+> ⚠️ **Gotcha vars Railway** : les variables au scope **shared (project)**
+> ne sont **pas** automatiquement héritées par les services. Il faut
+> soit les recréer au scope service, soit poser des références
+> `${{ shared.VAR_NAME }}` dans la définition service. Notre
+> déploiement initial a planté avec `RuntimeError: PAPPERS_API_KEY not
+> set` parce que les vars étaient au project-level uniquement.
+> Correctif : `variableCollectionUpsert` mutation avec serviceId +
+> values pointant `${{ shared.X }}`. Cf. déploiement S08 phase 2.
 
 ---
 
