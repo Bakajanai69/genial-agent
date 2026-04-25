@@ -1,7 +1,7 @@
 # S05 — Garde-fous 6 couches
 
-> **Statut** : 🟡 phase 1 raffinée (2026-04-24) · prêt pour dev agent
-> **Durée estimée** : 1 h 30
+> **Statut** : ✅ approved (2026-04-25) · review fixes intégrés · 273 unit + 7 live verts
+> **Durée estimée** : 1 h 30 (réelle : ~2 h dev + ~45 min review fixes)
 > **Parallélisable avec** : S06
 
 ---
@@ -2480,3 +2480,219 @@ changement à S04 maintenant pour éviter risque de régression. S09
 
 Sans déduplication : 5 lignes de code dupliquées entre deux modules.
 Coût acceptable.
+
+---
+
+## 🔍 Phase 3 — Review fixes (2026-04-25)
+
+Review adversariale (commit `0bcaf22`) puis ajout tests live + fixes
+flakes (commit suivant). Détail des 9 findings traités et de la
+couverture live ajoutée.
+
+### Findings critiques — sécurité input_gate
+
+#### F-1 : bypass `\b` par caractère word préfixé
+
+**Diagnostic** — `\b` n'est pas satisfait entre deux caractères word ;
+`xIgnore previous instructions` n'a pas de `\b` avant `Ignore` et passe
+le filtre. La review live a confirmé l'attaque sur 10 keywords
+(ignore/disregard/forget/reveal/repeat/pretend/use/…).
+
+**Fix** — retire la frontière gauche (`\b` initial et tentative de
+lookbehind `(?<![a-z0-9_])`, tous deux équivalents et tous deux
+contournés par un préfixe word). La spécificité du pattern complet
+(mot-clé + structure intermédiaire + suffixe) garantit l'absence de
+faux positifs en français/anglais standard, parce qu'on ne génère pas
+naturellement la séquence `ignore + qualifiers + instructions` dans
+un autre contexte. Bord droit `\b` conservé pour éviter
+`instructionspecial`.
+
+**Tests régression** — `test_word_prefix_bypass_blocked` (10 cas
+paramétrés : `xIgnore`, `aaaIgnore`, `9Ignore`, `_Ignore`, `xDisregard`,
+`xForget`, `xReveal`, `xRepeat`, `xPretend`, `xUse the send_email tool`).
+
+#### F-2 : bypass par caractères zero-width
+
+**Diagnostic** — `Ignore<ZWSP>previous instructions` → `NFKD + ASCII
+encode("ignore")` drop le ZWSP (non-ASCII) → fusion `ignoreprevious
+instructions` → pattern `\s+` rate. 8 caractères Unicode `Cf` testés
+en bypass live : ZWSP, ZWNJ, ZWJ, BOM, soft-hyphen, LRM, RLM, Word
+Joiner.
+
+**Fix** — `text.py::normalize_fr` remplace la catégorie Unicode `Cf`
+par un espace ASCII *avant* le encode → drop. Préserve leur rôle de
+séparateur invisible côté detection. `Cc` (control) volontairement
+préservée pour ne pas casser le pattern fake-turn `^\s*system:` en
+mode `re.MULTILINE` (qui dépend de `\n` pour matcher).
+
+**Tests régression** — `test_zero_width_obfuscation_blocked` (8 cas
+paramétrés sur les chars `Cf`).
+
+**Limite documentée** — ZW *à l'intérieur* d'un keyword
+(`Ig<ZWSP>nore`) → `Cf → space` casse le mot-clé en `ig nore`, le
+pattern rate. Délégué au critic Haiku async (C6) : un attaquant qui
+obfusque ses keywords est suspect par nature et le critic flagge.
+Documenté dans `input_gate.py`.
+
+### Findings majeurs — robustesse pipeline
+
+#### F-3 : test T8 §15 trompeur
+
+**Diagnostic** — `test_T8_length_cap` utilisait un message de 5 000
+chars qui dépassait le cap `MAX_INPUT_LENGTH=2000` → couverture
+`input_too_long` mais pas le scénario §15 T8 (« injection planquée
+au milieu d'un message *sous* le cap »).
+
+**Fix** — renomme l'ancien en `test_T8_length_cap_above` (le
+short-circuit length cap est légitime, on garde le test) et ajoute
+`test_T8_injection_below_cap` qui construit un message ~1 100 chars
+avec injection planquée → doit retourner `REASON_CODE_INPUT_INJECTION`
+(et pas `INPUT_TOO_LONG`).
+
+#### F-4 : faux positif `tool_redirection` sur `fetch`/`curl`/`wget`
+
+**Diagnostic** — Pappers MCP n'expose aucun de ces tools ; le pattern
+les bloquait sur usage naturel (`Use the fetch tool from Pappers to
+get LVMH`).
+
+**Fix** — retire `fetch`/`curl`/`wget` du pattern. Garde
+`send_email`/`send_message`/`exec`/`shell` qui restent dangereux et
+hors scope.
+
+**Tests régression** — `test_fetch_tool_no_longer_false_positive`
+(3 phrases naturelles).
+
+#### F-5 : pas d'`aclose()` sur le sub-generator routing
+
+**Diagnostic** — `pipeline.py` itérait `async for event in
+run_routed_turn(...)` sans `try/finally aclose()`, contredit PEP 789
+référencée en phase 1 et l'usage soigneux dans S04 lui-même. Risque
+fuite `state.lock` si consumer (S06) déconnecte mid-stream.
+
+**Fix** — wrappe l'itération dans `try/finally await routed.aclose()`.
+Ajoute en plus un `finally` qui cancel le `critic_task` si aclose
+intervient entre les yields `critic_pending` et `critic_result`.
+
+#### F-6 : message `capped` hardcodé
+
+**Diagnostic** — `f"{MAX_TOKENS_PER_SESSION} tokens/session"` ment
+quand le test patche `cap` à 1 (affichait toujours `50000`).
+
+**Fix** — `f"{budget.cap} tokens/session"` (property exposée par
+`TokenBudget` justement pour ça).
+
+#### F-7 : `MONEY_RE` trop permissif
+
+**Diagnostic** — `(?:CA|chiffre|effectif)\s*\d` matche un seul chiffre
+suivant le mot-clé → faux positif `missing_bilan_date` sur `effectif:
+1 employé` ou `CA des années 1980`.
+
+**Fix** — exige `\d{2,}` dans la branche mots-clés. La branche montant
+(`94 Md€`, `5k€`) garde `\d` (l'unité lève l'ambiguïté).
+
+### Findings mineurs
+
+#### F-8 : reframing advisory grammaticalement cassé
+
+**Diagnostic** — sub-regex transformait `Je te conseille d'investir`
+en `[reformulation neutre] d'investir` → grammaticalement bancal,
+trompeur côté UX.
+
+**Fix** — remplace par un disclaimer ajouté en pied (`DISCLAIMER_ADVISORY`,
+single source of truth dans `output_validator.py`). Texte original
+préservé → un humain juge ; disclaimer cadre la nature non-conseil.
+
+**Tests** — `test_degrade_reframes_advisory_silently` renommé en
+`test_degrade_appends_advisory_disclaimer`, asserte que le texte
+original est préservé ET que `DISCLAIMER_ADVISORY` est en pied.
+
+#### F-13 : code mort
+
+`output_validator.py::Source` Pydantic class jamais référencée →
+suppression. Pydantic `BaseModel`/`Field` toujours utilisés par
+`OutputValidationResult`.
+
+### Tests live ajoutés (post-review)
+
+Le rapport diagnostic post-review a constaté un **trou de couverture
+live** : aucun test ne passait par `run_guarded_turn` end-to-end avec
+vrai Claude + vrai MCP Pappers. Tous les 6 tests pipeline E2E unit
+utilisaient des fakes. Risque : se rendre compte en S06 (UI) ou pire
+en démo qu'un comportement aval (LLM réel + latence réseau réelle)
+n'est pas conforme.
+
+**Tests live ajoutés dans `tests/integration/test_S05_critic_live.py`** :
+
+| Test | Cas | Coût Pappers | Validation |
+|---|---|---|---|
+| `test_pipeline_input_injection_blocked_live` | T1 §15 + F-1/F-2 confirmés | 0 crédit | `input_rejected` first event, 0 réseau aval |
+| `test_pipeline_lvmh_golden_path_live` | U1 LVMH (Haiku golden path) | ~3-5 crédits | routing initial Haiku, ≥ 1 tool_use, SIREN 775670417 cité, **pas d'orphan SIREN** (annexe B confirmée), critic émis bien formé |
+| `test_pipeline_compare_routes_sonnet_live` | U3 keyword router → Sonnet | 0-6 crédits | routing initial Sonnet via keyword, routing_done émis, critic émis ; tool_uses tolérés à 0 si cap_wall_clock |
+
+### Issue I-1 — `WALL_CLOCK_S` 15 s sur env à forte latence
+
+**Diagnostic en run live** — sur la machine de dev (WSL + Anthropic
+global geo + Pappers cold start), la latence cumulée
+(sirenisateur ~2 s + recherche-entreprises ~2 s + Anthropic round-trip
+~3-5 s) dépasse régulièrement 15 s avant le 4e tool_use. Le filet
+`cap_wall_clock` se déclenche → escalade Haiku → Sonnet en mode
+`forced` même sur U1 simple.
+
+**Comportement positif** : le filet S04 fait son travail, l'agent
+continue en Sonnet et conclut. Mais **les tests live S04/S05
+asseved trop strictement** que Haiku reste tier final → flake non-
+fonctionnelle.
+
+**Fixes appliqués** :
+
+1. **F-A** — `test_pipeline_compare_routes_sonnet_live` adouci :
+   asserte le routing initial Sonnet (contrat dur) + que critic est
+   émis (contrat dur). Tolère `tool_uses == 0` si `capped` car le
+   keyword router est l'objet du test, pas le débit réseau.
+2. **F-B** — `test_simple_stays_haiku_live` adouci : si
+   `routing_done.escalated`, vérifie que le mode est `forced` via
+   `cap_wall_clock` ou `cap_tool_calls_per_turn` (jamais `self`,
+   l'auto-escalade Haiku serait suspecte sur fiche LVMH simple).
+3. **F-C** — `caps.py::WALL_CLOCK_S` lit `WALL_CLOCK_S_OVERRIDE` env
+   var au module-load. Permet `WALL_CLOCK_S_OVERRIDE=20` en `.env`
+   local sans dérogation cahier (la valeur prod Railway EU-West reste
+   15 s). Documenté dans `.env.example`.
+
+**Recommandation S09 polish** : avant la démo, vérifier sur Railway
+EU-West que la latence Pappers + Anthropic global tient en 15 s sur
+U1 simple. Si non, soit bumper le cap (dérogation cahier §5.3), soit
+documenter le badge `⚡→🧠` plus fréquent que prévu pour Fabien dans
+`EVALUATION.md`.
+
+### Observation pendant le run live (non-bug, signal positif)
+
+Le critic Haiku a flaggé une réponse LVMH (en escalade Sonnet) avec
+`color=red`, `hallucination_risk=high`, issues
+`["Chiffres 2024 non sourcés", "Résultat net incohérent", "Effectifs
+siège social imprécis"]`. **Sonnet en escalation forced sur-élabore
+et invente des chiffres 2024 non disponibles dans Pappers** (les
+bilans 2024 ne sont pas encore déposés à date).
+
+**Diagnostic** : ce n'est pas un bug S05 — au contraire, c'est la
+preuve que la couche C6 fait son travail. Mais c'est un signal pour
+S09 polish : le system prompt durci (S03) devrait être plus strict
+sur l'interdiction de chiffres non-sourcés post-2023, ou Sonnet (qui
+n'est pas censé inventer) doit être briefé que Pappers est la *seule*
+source autorisée.
+
+### Métriques review
+
+- **Unit tests** : 251 → 273 (+22 = 10 word-prefix bypass + 8
+  zero-width + 1 sub-cap injection + 3 fetch FP).
+- **Live tests** : 2 → 7 (+5 = 3 pipeline E2E + 2 critic isolé
+  conservés).
+- **Lint** : `ruff check` + `ruff format` clean.
+- **Crédits Pappers consommés sur le run review** : ~12 crédits sur
+  61 dispos. Reste ~49.
+
+### Commits associés
+
+- `0bcaf22` — `review(S05): fix — bypass injection (word-prefix,
+  zero-width), pipeline aclose, validator polish`
+- (à venir) — `review(S05): live tests pipeline E2E + WALL_CLOCK_S
+  env override + tests S04 plus tolérants`
