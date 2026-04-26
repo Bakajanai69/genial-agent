@@ -20,42 +20,47 @@
 
 /* ─── S09.7 UI : couleurs Genial (logo violet/bleu) ──────────────────
    Couleurs extraites du logo source (genial-logo.png) :
-   - Violet primaire : #6040C0 (couleur #1 dominante du logo)
-   - Bleu accent    : #4080E0 (couleur #2)
-   On override les variables CSS Chainlit (--primary, --primary-foreground)
-   ainsi que les sélecteurs spécifiques pour le bouton d'envoi et les
-   liens hypertexte (SIREN cliquables vers pappers.fr/entreprise/X).
+   - Violet primaire : #6040C0 → HSL 255 50% 50% (couleur #1 du logo)
+   - Bleu accent    : #4080E0 → HSL 216 72% 56% (couleur #2 du logo)
 
-   Fragile : sélecteurs Chainlit 2.11.x. Si le markup change,
-   le fallback se fait sur les variables CSS qui sont plus stables. */
+   Chainlit 2.11 utilise Tailwind/shadcn avec les variables CSS HSL
+   ``--primary`` / ``--primary-foreground`` (format HSL **sans wrapper
+   ``hsl()``** : ``--primary: 340 92% 52%``). Le bouton d'envoi et tous
+   les éléments primary (focus rings, accents) consomment ces variables
+   via ``hsl(var(--primary))``. Override **en HSL** (pas en hex) pour
+   propager partout. */
 
-:root {
-    /* Override des variables CSS Chainlit — applique partout où elles
-       sont utilisées (bouton send, accents, focus rings, etc.) */
-    --primary: #6040c0;
-    --primary-foreground: #ffffff;
+:root,
+:root[data-theme="dark"],
+:root[data-theme="light"] {
+    --primary: 255 50% 50% !important;
+    --primary-foreground: 0 0% 100% !important;
 }
 
-/* Bouton d'envoi (cercle rose Chainlit par défaut → violet Genial) */
-button[aria-label="Send message"],
-button[data-testid="send-button"],
-#chat-input button[type="submit"] {
-    background-color: #6040c0 !important;
-    color: #ffffff !important;
+/* Belt-and-suspenders : override aussi les classes Tailwind utility
+   bg-primary / text-primary qui pourraient être inlinées avec une
+   couleur de fallback. */
+.bg-primary,
+[class*="bg-primary"] {
+    background-color: hsl(255 50% 50%) !important;
 }
-button[aria-label="Send message"]:hover,
-button[data-testid="send-button"]:hover,
-#chat-input button[type="submit"]:hover {
-    background-color: #5030b0 !important;
+.text-primary,
+[class*="text-primary"]:not([class*="text-primary-foreground"]) {
+    color: hsl(255 50% 50%) !important;
+}
+[class*="border-primary"] {
+    border-color: hsl(255 50% 50%) !important;
 }
 
-/* Liens hypertexte (SIREN cliquables, lien GitHub footer, etc.)
-   Bleu Genial #4080E0 — meilleure lisibilité que le violet plein
-   sur fond sombre. */
-a[href]:not([data-testid]) {
-    color: #4080e0 !important;
+/* Liens hypertexte (SIREN cliquables vers pappers.fr/entreprise/X,
+   lien GitHub footer, etc.) — bleu #4080E0 plus lisible que le violet
+   plein sur fond sombre Chainlit. ``a[href]`` global, exclusion des
+   liens "internal" Chainlit (boutons d'action ou tabs sans href) ne
+   les match pas naturellement vu qu'ils n'ont pas de href. */
+a[href^="http"] {
+    color: hsl(216 72% 56%) !important;
 }
-a[href]:not([data-testid]):hover {
-    color: #60a0f0 !important;
+a[href^="http"]:hover {
+    color: hsl(216 80% 65%) !important;
     text-decoration: underline;
 }

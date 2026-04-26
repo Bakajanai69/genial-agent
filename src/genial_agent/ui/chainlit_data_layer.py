@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -68,18 +69,51 @@ ANONYMOUS_USER_ID = "anonymous"
 # (review S09.6 P1-3).
 SESSION_OWNER_KEY = "session_owner_id"
 
+# S09.7 hotfix : nom du cookie posé par ``public/owner-cookie.js`` côté
+# navigateur (lu/créé depuis ``localStorage`` au pageload). Permet la
+# **persistance multi-session** des conversations dans la sidebar
+# Chainlit : sans ce cookie, l'``owner_id`` était un UUID éphémère
+# par-session-WebSocket → la sidebar redevenait vide à chaque refresh.
+OWNER_COOKIE_NAME = "genial_owner_id"
+# Pattern conservateur : UUID hex (32 chars) ou format lib JS (avec
+# tirets). On exclut les caractères qui pourraient indiquer une
+# injection (HTML, quotes, etc.).
+_OWNER_COOKIE_RE = re.compile(rf"\b{OWNER_COOKIE_NAME}=([A-Za-z0-9-]{{8,64}})")
+
 
 def _resolve_owner_id() -> str:
     """Retourne l'``owner_id`` de la session courante, ou
     ``ANONYMOUS_USER_ID`` en fallback (hors contexte Chainlit).
 
+    Ordre de priorité (S09.7 hotfix) :
+
+    1. **Cookie HTTP ``genial_owner_id``** posé par ``public/owner-cookie.js``
+       depuis ``localStorage`` côté navigateur. Persiste cross-session
+       et cross-refresh, c'est l'identité durable du visiteur.
+    2. **``cl.user_session.get(SESSION_OWNER_KEY)``** — UUID éphémère
+       par-session-WebSocket (fallback si JS bloqué ou cookie pas
+       encore posé au tout 1er pageload).
+    3. **``ANONYMOUS_USER_ID``** — hors contexte Chainlit (tests unit).
+
     Import tardif de ``chainlit`` : le data layer est importable hors
     contexte Chainlit (tests unit, scripts), et ``cl.user_session`` lève
     ``ChainlitContextException`` (pas un ``LookupError``) si appelée hors
-    WebSocket. On catch large (``Exception``) parce que les erreurs
-    possibles dépendent de la version Chainlit ; toutes les erreurs hors
-    contexte tombent sur le fallback.
+    WebSocket. On catch large (``Exception``).
     """
+    # 1. Cookie persistant côté navigateur.
+    try:
+        import chainlit as cl
+
+        environ = getattr(cl.context.session, "environ", None) or {}
+        cookies = environ.get("HTTP_COOKIE", "")
+        if cookies:
+            match = _OWNER_COOKIE_RE.search(cookies)
+            if match:
+                return match.group(1)
+    except Exception:  # noqa: BLE001, S110 — fallback sur les autres sources
+        pass
+
+    # 2. UUID éphémère par-session-WebSocket (fallback historique).
     try:
         import chainlit as cl
 
@@ -88,6 +122,8 @@ def _resolve_owner_id() -> str:
             return owner
     except Exception:  # noqa: BLE001, S110 — fallback silencieux hors contexte Chainlit
         pass
+
+    # 3. Hors contexte (tests unit, scripts).
     return ANONYMOUS_USER_ID
 
 
