@@ -19,6 +19,14 @@ dependencies = [
     # Borne haute lâche (<1.0) — aiosqlite est stable, breaking changes
     # rares. 0.22.1 est la dernière stable PyPI au 2026-04-26.
     "aiosqlite>=0.20.0,<1.0",
+    # S09.7 (Axe 1 A2) — wildcard JSONPath pour le payload_vault.
+    # 1.8.0 corrige CVE-2025-56005 (pickle dans ply vendored).
+    # API : jsonpath_ng.ext.parse(expr).find(data) → list[DatumInContext].
+    # Délégation conditionnelle dans payload_vault._walk : on n'invoque
+    # jsonpath-ng QUE pour les paths contenant `[*]` / `..` / `[?` ; les
+    # paths simples restent sur le walker custom (M1, désambiguïsation
+    # dict-vs-list par contexte).
+    "jsonpath-ng>=1.8.0,<2",
 ]
 
 [project.optional-dependencies]

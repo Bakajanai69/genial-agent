@@ -49,6 +49,14 @@ class Stats:
     payloads_offloaded_total: int = 0
     payload_inspects_total: int = 0
     payload_searches_total: int = 0
+    # S09.7 — instrumentation prompt caching Anthropic. Permet de
+    # mesurer le ROI du cache_control posé sur tools+system+messages[-1].
+    # ``cache_creation`` = tokens facturés à 1.25× input price (write).
+    # ``cache_read`` = tokens facturés à 0.1× input price (read 90% off).
+    # Cible : ratio ``cache_read / (input_tokens + cache_read) > 50%``
+    # à partir du 2ème round (cf. story §"Mesure prompt caching").
+    anthropic_cache_creation_tokens: int = 0
+    anthropic_cache_read_tokens: int = 0
 
 
 _stats = Stats()
@@ -66,6 +74,8 @@ _INCR_FIELDS = frozenset(
         "payloads_offloaded_total",
         "payload_inspects_total",
         "payload_searches_total",
+        "anthropic_cache_creation_tokens",
+        "anthropic_cache_read_tokens",
     }
 )
 
@@ -109,6 +119,8 @@ def snapshot() -> dict[str, int | str]:
         "payloads_offloaded_total": _stats.payloads_offloaded_total,
         "payload_inspects_total": _stats.payload_inspects_total,
         "payload_searches_total": _stats.payload_searches_total,
+        "anthropic_cache_creation_tokens": _stats.anthropic_cache_creation_tokens,
+        "anthropic_cache_read_tokens": _stats.anthropic_cache_read_tokens,
     }
 
 

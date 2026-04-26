@@ -64,6 +64,38 @@ logger = structlog.get_logger(__name__)
 
 CRITIC_TIMEOUT_S = 10.0
 
+# S09.7 Axe 3 C4 — Liste des reason_codes pour lesquels le pipeline
+# émet un event ``cap_continuation_proposed`` après ``capped``. La UI
+# Chainlit (S06) intercepte cet event pour afficher des actions
+# « Continuer » / « Synthèse partielle » plutôt que de laisser
+# l'utilisateur en dead-end conversationnel. Le contexte (vault inclus)
+# est préservé sur le ``ConversationState`` session-scoped.
+#
+# Si un nouveau reason_code apparaît côté routing/token_budget, l'ajouter
+# ici **et** dans le test paramétré
+# ``test_continuation_event_supported_reason_codes``.
+CONTINUATION_REASON_CODES = frozenset(
+    {
+        "cap_token_budget",
+        "cap_tool_calls_per_turn",
+        "cap_local_lookups_per_turn",
+        "cap_wall_clock",
+    }
+)
+
+
+def _continuation_event(capped_event: dict[str, Any], session_id: str) -> dict[str, Any]:
+    """Construit l'event ``cap_continuation_proposed`` à partir d'un
+    ``capped`` reçu/émis. ``reason_code`` doit être dans
+    ``CONTINUATION_REASON_CODES`` ; sinon l'event n'est PAS émis (la
+    dispatch côté pipeline doit avoir filtré en amont)."""
+    return {
+        "type": "cap_continuation_proposed",
+        "reason_code": capped_event.get("reason_code"),
+        "reason": capped_event.get("reason", ""),
+        "session_id": session_id,
+    }
+
 
 async def run_guarded_turn(
     state: ConversationState,
@@ -114,11 +146,18 @@ async def run_guarded_turn(
             "pipeline_token_budget_pre_exhausted",
             session_id=session_id,
         )
-        yield {
+        capped_event = {
             "type": "capped",
             "reason_code": REASON_CODE_CAP_TOKEN_BUDGET,
             "reason": f"{budget.cap} tokens/session",
         }
+        yield capped_event
+        # S09.7 Axe 3 C4 : cap-as-UX-event. La UI propose Continuer /
+        # Synthèse au lieu de dead-end. Le user devra reset le budget
+        # côté UI (typiquement via "nouvelle conversation" ou un
+        # bouton dédié) — le pipeline n'auto-reset pas (préserve
+        # l'audit trail des budgets).
+        yield _continuation_event(capped_event, session_id)
         return
 
     # --- Run routed turn avec observation budget + collect sirens ---
@@ -142,6 +181,16 @@ async def run_guarded_turn(
             yield event
 
             etype = event.get("type")
+
+            # S09.7 Axe 3 C4 — cap-as-UX-event. Pour CHAQUE event
+            # ``capped`` émis (par run_routed_turn ou par nous), on
+            # émet un ``cap_continuation_proposed`` pour que la UI
+            # propose Continuer / Synthèse partielle.
+            if etype == "capped":
+                rc = event.get("reason_code")
+                if rc in CONTINUATION_REASON_CODES:
+                    yield _continuation_event(event, session_id)
+
             if etype == "text":
                 text_chunks.append(event.get("content", ""))
             elif etype == "llm_meta":
@@ -158,21 +207,37 @@ async def run_guarded_turn(
                 # message-utilisateur. Bind contextvar du ``request_id``
                 # par-appel : chaque ``bind_contextvars`` écrase le
                 # précédent, c'est attendu (request_id par-appel).
+                #
+                # S09.7 — agrégation des compteurs prompt caching
+                # (cache_creation, cache_read). Cible mesurable :
+                # cache_read_tokens / input_tokens > 50 % à partir du
+                # 2ème round (cf. story §"Mesure prompt caching").
+                cache_creation = int(event.get("cache_creation_tokens") or 0)
+                cache_read = int(event.get("cache_read_tokens") or 0)
                 stats_incr(
                     total_llm_calls=1,
                     anthropic_input_tokens=in_tok,
                     anthropic_output_tokens=out_tok,
+                    anthropic_cache_creation_tokens=cache_creation,
+                    anthropic_cache_read_tokens=cache_read,
                 )
                 request_id = event.get("request_id")
                 if request_id:
                     structlog.contextvars.bind_contextvars(request_id=request_id)
                 if not budget_emitted and await budget.exhausted(session_id):
                     budget_emitted = True
-                    yield {
+                    capped_inflight = {
                         "type": "capped",
                         "reason_code": REASON_CODE_CAP_TOKEN_BUDGET,
                         "reason": f"{budget.cap} tokens/session",
                     }
+                    yield capped_inflight
+                    # S09.7 Axe 3 C4 — pendant qu'on est encore dans
+                    # la boucle ``run_routed_turn``, on émet aussi le
+                    # ``cap_continuation_proposed``. La boucle finit
+                    # son itération en cours (S04 ne ``break`` pas sur
+                    # ce capped) puis l'event ``end`` clôture proprement.
+                    yield _continuation_event(capped_inflight, session_id)
             elif etype == "tool_result":
                 # Collecte des SIREN Luhn-valides dans les tool_results pour
                 # ``allowed_sirens`` du validator. ``content_preview`` est

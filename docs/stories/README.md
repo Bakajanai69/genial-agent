@@ -216,7 +216,7 @@ opérationnelles.
 | S09 | [Polish : README, EVALUATION, Loom](./S09-polish.md) | 🟡 en cours (dev done) | S04, S05, S06, S08 | — |
 | S09.5 | [Gestion robuste des payloads MCP volumineux](./S09.5-mcp-payload-handling.md) | 🟡 en cours (dev done + review fixes) | S09 (dogfooding) | — |
 | S09.6 | [Workaround tools MCP & cache crédits persistant (+ persistance conversations)](./S09.6-mcp-workaround-and-credit-cache.md) | 🟡 phase 2 dev done (review pending) | S09.5 (post-livraison) | — |
-| S09.7 | [Robustesse extraction MCP & UX des caps](./S09.7-extraction-robustness-and-cap-ux.md) | 🟡 phase 1 figée 2026-04-26 (dev pending) | S09.5, S09.6 | — |
+| S09.7 | [Robustesse extraction MCP & UX des caps](./S09.7-extraction-robustness-and-cap-ux.md) | 🟡 dev done 2026-04-26 (review pending) | S09.5, S09.6 | — |
 | S10 | [🎯 Stretch : brief vocal ElevenLabs](./S10-voice-brief.md) | ⬜ bloqué (gating) | S09 | — |
 
 **Légende** : ⬜ à faire · 🟡 en cours · ✅ approuvée · ⏸ bloquée

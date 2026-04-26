@@ -164,15 +164,54 @@ async def dispatch_event(event: dict[str, Any], state: TurnState) -> None:
         return
 
     if et == "capped":
+        # S09.7 Axe 3 C4 — l'event ``capped`` reste informatif. La UX
+        # de continuation est portée par ``cap_continuation_proposed``
+        # juste après (avec actions cliquables). On garde ici un
+        # message court (pas de "ouvre une nouvelle conversation"
+        # historique : le contexte n'est plus un dead-end).
         rc = event.get("reason_code", "?")
         reason = event.get("reason", "?")
         await cl.Message(
+            content=f"🛑 Cap atteint (`{rc}`) : {reason}.",
+            author="Système",
+            type="system_message",
+        ).send()
+        return
+
+    if et == "cap_continuation_proposed":
+        # S09.7 Axe 3 C4 — propose des actions UX non-bloquantes plutôt
+        # que d'arrêter sec. Le ``ConversationState`` (vault inclus)
+        # est préservé côté ``cl.user_session``, donc cliquer
+        # « Continuer » relance ``run_guarded_turn`` sur le même state
+        # avec une instruction de continuation. « Synthèse partielle »
+        # demande à l'agent de résumer ce qu'il a déjà obtenu sans
+        # nouveaux tool calls coûteux.
+        rc = event.get("reason_code", "?")
+        reason = event.get("reason", "?")
+        actions = [
+            cl.Action(
+                name="continue_turn",
+                value=str(rc),
+                payload={"reason_code": rc, "reason": reason},
+                label="🔄 Continuer",
+            ),
+            cl.Action(
+                name="synthesize_partial",
+                value="synthesize",
+                payload={"reason_code": rc},
+                label="📋 Synthèse partielle",
+            ),
+        ]
+        await cl.Message(
             content=(
-                f"🛑 Cap atteint (`{rc}`) : {reason}. Ouvre une nouvelle "
-                f"conversation pour repartir sur un budget propre."
+                f"⚠️ Limite atteinte (`{rc}` : {reason}). Le contexte "
+                f"est préservé — clique sur **Continuer** pour relancer "
+                f"ou **Synthèse partielle** pour résumer ce qui a déjà "
+                f"été obtenu."
             ),
             author="Système",
             type="system_message",
+            actions=actions,
         ).send()
         return
 

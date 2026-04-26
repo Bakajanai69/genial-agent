@@ -176,12 +176,20 @@ def test_index_skeleton_max_depth() -> None:
 
 
 def test_index_skeleton_summarizes_arrays() -> None:
-    """Les arrays sont résumés en ``<type>[N items]``, pas étalés."""
-    raw = json.dumps({"items": [{"id": i} for i in range(100)]})
+    """Les arrays de dicts exposent un sample du 1er item + un marker
+    de count (S09.7 B3). Auparavant (S09.5) on rendait juste
+    ``["<dict>[N items]"]`` ; le sample est plus utile au LLM pour
+    choisir le bon path du premier coup."""
+    raw = json.dumps({"items": [{"id": i, "label": f"item_{i}"} for i in range(100)]})
     index = build_index(raw, "p_x")
     items_skel = index["_skeleton"]["items"]
     assert isinstance(items_skel, list)
-    assert items_skel == ["<dict>[100 items]"]
+    # 1er élément : sample dict avec les vraies clés
+    assert isinstance(items_skel[0], dict)
+    assert "id" in items_skel[0]
+    assert "label" in items_skel[0]
+    # Queue : marker count
+    assert any(isinstance(x, str) and "more" in x for x in items_skel[1:])
 
 
 def test_index_handles_non_json_payload() -> None:

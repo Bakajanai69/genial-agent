@@ -1,4 +1,4 @@
-"""S09.6 (H3') — Custom Chainlit data layer SQLite anonymous-user.
+"""S09.6 (H3') — Custom Chainlit data layer SQLite per-session-isolated.
 
 Backend SQLite via ``aiosqlite`` (async) ; pas d'auth, pas de S3, pas de
 PostgreSQL. Persiste les threads + steps + feedbacks pour que la sidebar
@@ -6,11 +6,24 @@ Chainlit (liste des conversations précédentes) survive aux redémarrages
 du serveur tant que le fichier ``data/cl_threads.db`` survit (bake
 Docker + volume Railway, cf. ``data_bootstrap.py``).
 
-Tous les threads sont attachés à un unique utilisateur ``anonymous``
-(constante ``ANONYMOUS_USER_ID``). C'est suffisant pour une démo
-single-tenant sans login (cf. validation phase 1 — Chainlit issue
-#2230). Si un jour le projet ajoute une vraie authentification,
-``get_user`` peut être étendu trivialement.
+**Isolation multi-tenant (review S09.6 P1-3)** : chaque session WebSocket
+Chainlit reçoit un ``owner_id`` UUID stocké dans ``cl.user_session``
+(``session_owner_id``). Tous les threads créés dans cette session sont
+attribués à ce ``owner_id`` et le data layer filtre ``list_threads`` /
+``get_thread`` / ``delete_thread`` par ce ``owner_id``. Conséquence :
+les visiteurs ne voient pas les threads des autres dans la sidebar, et
+ne peuvent pas pull un thread d'un voisin via URL trafiquée.
+
+Limites assumées :
+
+- Sans cookie persistant, l'``owner_id`` change à chaque rafraîchissement
+  de page → la sidebar redevient vide. Acceptable pour une démo de
+  quelques minutes (cf. story §"Critère 'fini'").
+- Si ``cl.user_session`` n'est pas accessible (test unit, hors contexte
+  Chainlit), on fallback sur ``ANONYMOUS_USER_ID`` constant.
+- L'historique des threads "anonymous" pré-fix reste accessible aux
+  visiteurs qui ont par hasard ``ANONYMOUS_USER_ID`` (impossible en
+  production avec UUID, mais possible en dev / test).
 
 **Hors scope (intentionnel)** :
 
@@ -31,6 +44,7 @@ sidebar peuplée avec les threads précédents → resume au clic.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -49,6 +63,33 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 ANONYMOUS_USER_ID = "anonymous"
+# Clé sous laquelle ``app.py:on_chat_start`` pose un UUID par session.
+# Lue par ``_resolve_owner_id`` pour isoler les threads par visiteur
+# (review S09.6 P1-3).
+SESSION_OWNER_KEY = "session_owner_id"
+
+
+def _resolve_owner_id() -> str:
+    """Retourne l'``owner_id`` de la session courante, ou
+    ``ANONYMOUS_USER_ID`` en fallback (hors contexte Chainlit).
+
+    Import tardif de ``chainlit`` : le data layer est importable hors
+    contexte Chainlit (tests unit, scripts), et ``cl.user_session`` lève
+    ``ChainlitContextException`` (pas un ``LookupError``) si appelée hors
+    WebSocket. On catch large (``Exception``) parce que les erreurs
+    possibles dépendent de la version Chainlit ; toutes les erreurs hors
+    contexte tombent sur le fallback.
+    """
+    try:
+        import chainlit as cl
+
+        owner = cl.user_session.get(SESSION_OWNER_KEY)
+        if isinstance(owner, str) and owner:
+            return owner
+    except Exception:  # noqa: BLE001, S110 — fallback silencieux hors contexte Chainlit
+        pass
+    return ANONYMOUS_USER_ID
+
 
 # Schéma minimal — 3 tables : threads, steps, feedbacks. Pas de table
 # users (un seul utilisateur ``anonymous`` dérivé en runtime). Toutes
@@ -133,14 +174,33 @@ class AnonymousSQLiteDataLayer(BaseDataLayer):
     def __init__(self, db_path: str = "data/cl_threads.db") -> None:
         self._db_path = db_path
         self._conn: aiosqlite.Connection | None = None
+        # Review S09.6 P1-2 : protège contre la race où deux requêtes
+        # Chainlit hit ``_get_conn`` la 1ère fois en parallèle (boot
+        # sidebar + 1er message). Sans lock, ``aiosqlite.connect`` yield
+        # le contrôle, les deux tasks voient ``self._conn is None`` et
+        # créent chacune une connexion — l'une devient orpheline.
+        self._init_lock = asyncio.Lock()
 
     async def _get_conn(self) -> aiosqlite.Connection:
-        if self._conn is None:
-            self._conn = await aiosqlite.connect(self._db_path)
-            self._conn.row_factory = aiosqlite.Row
-            await self._conn.executescript(_SCHEMA_SQL)
-            await self._conn.commit()
-            logger.info("chainlit_data_layer_init", db_path=self._db_path)
+        # Fast-path sans lock : si la connexion est déjà ouverte, retour
+        # immédiat. Le lock ne sert qu'à protéger l'init.
+        if self._conn is not None:
+            return self._conn
+        async with self._init_lock:
+            # Double-check : un autre task peut avoir initialisé pendant
+            # qu'on attendait le lock.
+            if self._conn is None:
+                self._conn = await aiosqlite.connect(self._db_path)
+                self._conn.row_factory = aiosqlite.Row
+                # Review S09.6 P1-4 : WAL pour permettre des reads
+                # concurrents pendant un write (cas démo ≥ 2 onglets,
+                # cf. cahier §17.4). ``synchronous=NORMAL`` suffit pour
+                # un cache de threads (pas de transaction critique).
+                await self._conn.execute("PRAGMA journal_mode=WAL;")
+                await self._conn.execute("PRAGMA synchronous=NORMAL;")
+                await self._conn.executescript(_SCHEMA_SQL)
+                await self._conn.commit()
+                logger.info("chainlit_data_layer_init", db_path=self._db_path)
         return self._conn
 
     # ── Users ────────────────────────────────────────────────────────
@@ -166,6 +226,10 @@ class AnonymousSQLiteDataLayer(BaseDataLayer):
     # ── Threads ──────────────────────────────────────────────────────
 
     async def get_thread(self, thread_id: str) -> ThreadDict | None:
+        """Charge un thread, en refusant l'accès aux threads d'un autre
+        owner (review S09.6 P1-3). Retourne ``None`` aussi bien sur
+        thread inexistant que sur thread d'un autre visiteur — ne pas
+        leaker l'existence."""
         conn = await self._get_conn()
         async with conn.execute(
             "SELECT * FROM threads WHERE id = ?",
@@ -173,6 +237,17 @@ class AnonymousSQLiteDataLayer(BaseDataLayer):
         ) as cur:
             row = await cur.fetchone()
         if row is None:
+            return None
+        # Isolation owner : un thread sans user_id (legacy) reste lisible
+        # par tous (rétrocompat), mais un thread attribué à un owner
+        # spécifique n'est lisible que par cet owner.
+        owner = _resolve_owner_id()
+        thread_owner = row["user_id"]
+        if thread_owner and thread_owner != owner:
+            logger.info(
+                "chainlit_data_layer_thread_access_denied",
+                thread_id=thread_id,
+            )
             return None
 
         async with conn.execute(
@@ -204,10 +279,22 @@ class AnonymousSQLiteDataLayer(BaseDataLayer):
         tags: list[str] | None = None,
     ) -> None:
         """UPSERT pattern — Chainlit appelle ``update_thread`` aussi pour
-        créer un thread (pas de ``create_thread`` distinct dans l'API)."""
+        créer un thread (pas de ``create_thread`` distinct dans l'API).
+
+        Review S09.6 P1-3 : si ``user_id`` n'est pas fourni explicitement,
+        on attribue le thread à l'``owner_id`` de la session courante.
+        Sur un UPDATE, on refuse silencieusement les modifs sur un thread
+        d'un autre owner (le visiteur n'aurait pas dû y accéder de toute
+        façon — son ``get_thread`` aurait retourné ``None``).
+        """
         conn = await self._get_conn()
         now = _now_iso()
-        async with conn.execute("SELECT id FROM threads WHERE id = ?", (thread_id,)) as cur:
+        owner = _resolve_owner_id()
+        effective_user_id = user_id or owner
+        async with conn.execute(
+            "SELECT id, user_id FROM threads WHERE id = ?",
+            (thread_id,),
+        ) as cur:
             exists = await cur.fetchone()
 
         if exists is None:
@@ -218,8 +305,8 @@ class AnonymousSQLiteDataLayer(BaseDataLayer):
                 (
                     thread_id,
                     name,
-                    user_id or ANONYMOUS_USER_ID,
-                    ANONYMOUS_USER_ID,
+                    effective_user_id,
+                    effective_user_id,
                     _dump_json(tags),
                     _dump_json(metadata),
                     now,
@@ -227,6 +314,14 @@ class AnonymousSQLiteDataLayer(BaseDataLayer):
                 ),
             )
         else:
+            # Refus silencieux d'écriture sur un thread d'un autre owner.
+            existing_owner = exists["user_id"]
+            if existing_owner and existing_owner != owner:
+                logger.info(
+                    "chainlit_data_layer_thread_update_denied",
+                    thread_id=thread_id,
+                )
+                return
             # Patch partiel : on met à jour seulement les colonnes fournies.
             updates: list[str] = []
             params: list[Any] = []
@@ -258,14 +353,19 @@ class AnonymousSQLiteDataLayer(BaseDataLayer):
     ) -> PaginatedResponse[ThreadDict]:
         """Pagination simple : ordonné par updated_at desc, curseur =
         dernier id retourné. Le filtre ``search`` (LIKE sur name) est
-        appliqué si présent ; ``feedback`` et ``userId`` sont ignorés
-        (un seul user, pas de feedback granulaire).
+        appliqué si présent ; ``feedback`` est ignoré (pas de feedback
+        granulaire en démo).
+
+        Review S09.6 P1-3 : on filtre par ``owner_id`` de la session
+        courante. Les threads "anonymous" (legacy / dev) restent visibles
+        à tous pour rétrocompat.
         """
         conn = await self._get_conn()
         limit = max(1, pagination.first or 20)
+        owner = _resolve_owner_id()
 
-        sql = "SELECT * FROM threads WHERE 1=1"
-        params: list[Any] = []
+        sql = "SELECT * FROM threads WHERE (user_id = ? OR user_id = ?)"
+        params: list[Any] = [owner, ANONYMOUS_USER_ID]
         if filters.search:
             sql += " AND name LIKE ?"
             params.append(f"%{filters.search}%")
@@ -316,15 +416,43 @@ class AnonymousSQLiteDataLayer(BaseDataLayer):
 
     async def delete_thread(self, thread_id: str) -> None:
         """Idempotent : delete d'un thread inexistant n'est pas une
-        erreur (Chainlit peut re-rejouer un delete au reload page)."""
+        erreur (Chainlit peut re-rejouer un delete au reload page).
+
+        Review S09.6 P1-3 : refus silencieux pour un thread d'un autre
+        owner. On ne lève pas (Chainlit s'attend à un no-op) mais on log.
+        """
         conn = await self._get_conn()
+        owner = _resolve_owner_id()
+        async with conn.execute(
+            "SELECT user_id FROM threads WHERE id = ?",
+            (thread_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        if row is not None:
+            existing_owner = row["user_id"]
+            if existing_owner and existing_owner != owner:
+                logger.info(
+                    "chainlit_data_layer_thread_delete_denied",
+                    thread_id=thread_id,
+                )
+                return
         await conn.execute("DELETE FROM steps WHERE thread_id = ?", (thread_id,))
         await conn.execute("DELETE FROM feedbacks WHERE thread_id = ?", (thread_id,))
         await conn.execute("DELETE FROM threads WHERE id = ?", (thread_id,))
         await conn.commit()
 
     async def get_thread_author(self, thread_id: str) -> str:
-        return ANONYMOUS_USER_ID
+        """Retourne l'``user_id`` enregistré du thread (review P1-3) — sinon
+        l'``ANONYMOUS_USER_ID`` constant pour les threads pré-fix."""
+        conn = await self._get_conn()
+        async with conn.execute(
+            "SELECT user_id FROM threads WHERE id = ?",
+            (thread_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        if row is None:
+            return ANONYMOUS_USER_ID
+        return row["user_id"] or ANONYMOUS_USER_ID
 
     async def delete_user_session(self, id: str) -> bool:  # noqa: A002 — match contrat Chainlit
         """No-op : pas de table de sessions. Retour ``True`` pour signaler

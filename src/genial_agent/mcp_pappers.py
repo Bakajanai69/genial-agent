@@ -337,6 +337,68 @@ async def list_available_tools() -> list[PappersTool]:
     return retained
 
 
+# S09.7 Axe 4bis — Carte des tools migrée du system prompt vers les
+# ``description`` MCP. Pattern Anthropic standard : un tool est
+# auto-documenté par son schéma, l'agent le lit en contexte de tool
+# selection sans qu'on injecte de règles transversales dans le system
+# prompt. La carte vivait dans ``prompts.py`` (S09.6) — elle est ici
+# en suffixe des descriptions Pappers d'origine, exposée par
+# ``to_anthropic_schema``.
+#
+# **Borne stricte** : uniquement des clarifications de schéma
+# input/output que Pappers aurait dû documenter. Pas de logique métier
+# (pas de SIREN spécifique, pas de "pour LVMH fais X"). Toute violation
+# = retour vers ``prompts.py`` pour discussion (test couvert par
+# ``test_S097_description_overrides.py::test_overrides_no_business_logic_leaks``).
+#
+# Bénéfice : un tool ajouté/retiré côté Pappers se documente
+# automatiquement via la discovery, sans toucher au system prompt.
+# Une question voisine non prévue (ex : "quel est le code NAF de X ?")
+# bénéficie aussi des descriptions enrichies sans qu'on ait à ajouter
+# une nouvelle puce de règle.
+DESCRIPTION_OVERRIDES: dict[str, str] = {
+    "sirenisateur": (
+        '\n\n[clarification schéma S09.7] Args : `country_code="FR"` + '
+        '`company_name="<nom>"`. Coût : 1 crédit. **Toujours en premier** '
+        "si le SIREN est inconnu — payload léger (~250 chars), permet de "
+        "basculer ensuite sur les tools `siren`-based."
+    ),
+    "recherche-entreprises": (
+        "\n\n[clarification schéma S09.7] Pour récupérer les chiffres "
+        "headline d'une année récente (CA, résultat, effectif), passer "
+        '`siren=<SIREN>` ET `return_fields=["chiffre_affaires", '
+        '"resultat", "capital", "effectif", "annee_finances", '
+        '"annee_effectif"]`. ATTENTION : `annee_finances` et '
+        "`annee_effectif` sont des **noms de champs** à passer dans "
+        "`return_fields`, pas des arguments top-level. Coût : 1 crédit, "
+        "accepte les jetons PAYG. Limites : 1 année courante seulement, "
+        "pas d'historique multi-années."
+    ),
+    "comptes-entreprise": (
+        "\n\n[clarification schéma S09.7] Args : `siren=<SIREN>` + "
+        "`annee=YYYY` (entier, optionnel — sans `annee` retourne tous les "
+        "exercices disponibles, payload jusqu'à ~700 K chars). Coût : 2 "
+        "crédits/appel. Bug serveur Pappers connu : peut renvoyer "
+        '"crédits insuffisants" même avec PAYG dispo (cf. champ '
+        "`workaround_hint` dans le tool_result si appel refusé)."
+    ),
+    "cartographie-entreprise": (
+        "\n\n[clarification schéma S09.7] Arg : `siren=<SIREN>`. Coût : "
+        "3 crédits. Payload volumineux (jusqu'à 706 K chars sur un groupe "
+        "complexe), systématiquement offloadé via le Payload Vault. "
+        "Top-level keys : `entreprise` (target), `filiales[]`, "
+        "`mandataires[]`, `actionnaires[]`."
+    ),
+    "recherche-dirigeants": (
+        '\n\n[clarification schéma S09.7] Args : `q="Prénom Nom"` ou '
+        '`nom_complet="Prénom Nom"` + `par_page=5` (recommandé, 10-50 si '
+        "exhaustivité demandée — coûte 1-4 crédits selon). Retourne "
+        "`resultats[]` avec homonymes potentiels — chaque résultat contient "
+        "`entreprises[]` listant les mandats actifs."
+    ),
+}
+
+
 def to_anthropic_schema(tools: list[PappersTool]) -> list[dict[str, Any]]:
     """Convertit des PappersTool vers la shape attendue par
     ``anthropic.messages.create(tools=[...])`` : ``name``,
@@ -345,11 +407,16 @@ def to_anthropic_schema(tools: list[PappersTool]) -> list[dict[str, Any]]:
     Contrainte Anthropic sur ``name`` : ``^[a-zA-Z0-9_-]{1,128}$`` — les
     noms kebab-case Pappers (``recherche-entreprises``) passent tels
     quels.
+
+    S09.7 Axe 4bis : applique ``DESCRIPTION_OVERRIDES`` qui suffixe la
+    description Pappers originale par les clarifications schéma utiles
+    au LLM. Aucune logique métier — uniquement de la doc input/output
+    que Pappers aurait dû fournir.
     """
     return [
         {
             "name": t.name,
-            "description": t.description,
+            "description": t.description + DESCRIPTION_OVERRIDES.get(t.name, ""),
             "input_schema": t.input_schema,
         }
         for t in tools
@@ -586,7 +653,11 @@ async def prewarm_cache(
     un best-effort, pas un bloquant de démarrage.
     """
     caller = call or call_tool
-    seeds = ("LVMH", "BNP Paribas", "Carrefour")
+    # Review S09.6 P1-6 : Casino ajouté pour aligner avec les 4 entités
+    # golden de prewarm_comptes_entreprise.py (LVMH, BNP, Carrefour,
+    # Casino). Sinon le starter "Compare Carrefour vs Casino" déclenchait
+    # 1 crédit live sur sirenisateur(Casino) au 1er chat sur cache vide.
+    seeds = ("LVMH", "BNP Paribas", "Carrefour", "Casino Guichard")
     for name in seeds:
         try:
             await caller(

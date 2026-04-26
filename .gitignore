@@ -57,17 +57,23 @@ traces/*.jsonl
 # reste local.
 traces/*.json
 
-# S09.6 — Bootstrap des caches versionnés pour que l'image Docker
+# S09.6 — Bootstrap du cache MCP versionné pour que l'image Docker
 # embarque un état initial valide (aucun crédit Pappers consommé au
 # premier boot Railway). Données publiques uniquement : Pappers ne
-# renvoie que des bilans / raisons sociales / SIREN publics, et le
-# data layer Chainlit utilise un user "anonymous" constant (pas d'auth,
-# pas de PII). Au runtime, le volume Railway monté sur /data prend le
-# relais (cf. docs/stories/S09.6-mcp-workaround-and-credit-cache.md
-# §"Architecture phase 1 — Axe 3 révisé").
+# renvoie que des bilans / raisons sociales / SIREN publics. Au runtime,
+# le volume Railway monté sur /data prend le relais (cf. docs/stories/
+# S09.6-mcp-workaround-and-credit-cache.md §"Architecture phase 1 —
+# Axe 3 révisé").
 #
-# Tout autre fichier sous data/ (snapshots locaux, dumps de debug)
-# reste ignoré par défaut.
+# Review S09.6 P0-1 : le fichier SQLite Chainlit (data/cl_threads.db)
+# n'est PAS versionné — il contient les messages utilisateur (PII libre)
+# et le data layer le crée à la volée via IF NOT EXISTS au premier
+# _get_conn(). Le bootstrap copie uniquement le cache MCP, pas le SQLite.
+#
+# Tout autre fichier sous data/ (snapshots locaux, dumps de debug,
+# WAL/SHM SQLite) reste ignoré par défaut.
 data/*
 !data/mcp_cache.json
-!data/cl_threads.db
+data/*.db
+data/*.db-wal
+data/*.db-shm

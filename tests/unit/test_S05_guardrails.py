@@ -69,17 +69,19 @@ def test_caps_single_source_of_truth() -> None:
     Bumps S08 review post tests live U3 :
 
     - ``MAX_TOOL_CALLS_PER_TURN`` 5→7 (cf. notes S08 §D + review S08 §B1)
-    - ``MAX_TOKENS_PER_SESSION`` 50_000→80_000 (idem)
+    - ``MAX_TOKENS_PER_SESSION`` 50_000→80_000 (idem) puis 80_000→200_000
+      (S09.7) — couplé à l'activation du prompt caching Anthropic.
     - ``WALL_CLOCK_S`` 15→30→60 (review S08 §B1bis 2 itérations) :
       le 30 s flapait encore en webapp prod (silent freeze post-
       ``comptes-entreprise`` round 2 → cap firefires sur TTFT round
       3 lourd). Cause racine : Anthropic prompt caching pas activé
-      côté ``agent.py`` ; vrai fix produit listé en next-step S09.
+      côté ``agent.py`` ; vrai fix produit listé en next-step S09 et
+      livré dans S09.7.
       60 s couvre le pire cas observé.
     """
     assert MAX_TOOL_CALLS_PER_TURN == 7
     assert WALL_CLOCK_S == 60
-    assert MAX_TOKENS_PER_SESSION == 80_000
+    assert MAX_TOKENS_PER_SESSION == 200_000
 
 
 def test_routing_imports_caps_from_guardrails() -> None:

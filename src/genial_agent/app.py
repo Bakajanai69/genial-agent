@@ -46,7 +46,10 @@ from genial_agent.observability import (
 from genial_agent.observability import (
     remaining as credits_remaining,
 )
-from genial_agent.ui.chainlit_data_layer import AnonymousSQLiteDataLayer
+from genial_agent.ui.chainlit_data_layer import (
+    SESSION_OWNER_KEY,
+    AnonymousSQLiteDataLayer,
+)
 from genial_agent.ui.entity_tracker import (
     ActiveEntity,
     extract_active_entity,
@@ -157,6 +160,12 @@ async def on_chat_start() -> None:
     # l'avertissement même si l'utilisateur a déjà été notifié dans une
     # session précédente.
     cl.user_session.set("credits_low_banner_shown", False)
+    # Review S09.6 P1-3 : owner_id par session pour isoler les threads
+    # de la sidebar Chainlit. Sans cookie persistant, l'UUID change à
+    # chaque rafraîchissement page — la sidebar redevient vide pour ce
+    # visiteur, mais reste invisible aux autres.
+    if not cl.user_session.get(SESSION_OWNER_KEY):
+        cl.user_session.set(SESSION_OWNER_KEY, uuid.uuid4().hex)
 
     # Healthcheck Pappers borné dur (cf. ``_HEALTHCHECK_TIMEOUT_S``).
     # ``mcp_pappers.healthcheck`` retourne déjà ``status="ko"`` sur
@@ -355,6 +364,87 @@ async def _drain_orphan_steps(turn_state: TurnState) -> None:
                 tool_use_id=tu_id,
                 error_type=type(exc).__name__,
             )
+
+
+# S09.7 Axe 3 C4 — Continuation prompts injectés dans le pipeline
+# quand l'utilisateur clique sur les actions « Continuer » / « Synthèse
+# partielle ». Pas de logique métier : on délègue intégralement au LLM
+# via une instruction texte. Le ``ConversationState`` session-scoped
+# (vault inclus) est préservé donc l'agent reprend là où il s'est
+# arrêté.
+_CONTINUE_USER_PROMPT = (
+    "Continue depuis où tu t'es arrêté. Le contexte (Payload Vault, "
+    "tool results précédents) est préservé."
+)
+_SYNTHESIZE_USER_PROMPT = (
+    "Synthétise ce que tu as déjà obtenu jusqu'ici à partir des tool "
+    "results disponibles dans le contexte — sans relancer de nouveaux "
+    "appels Pappers coûteux. Indique clairement ce qui manque encore "
+    "si la réponse est partielle."
+)
+
+
+async def _resume_after_cap(continuation_prompt: str) -> None:
+    """Relance ``run_guarded_turn`` sur le même state après un cap.
+
+    Le bouton « Continuer » / « Synthèse » de la UI déclenche cette
+    fonction. Le state est récupéré via ``cl.user_session`` (jamais un
+    singleton global). Si le budget tokens était saturé, on le reset
+    pour la session courante — sinon le pipeline ré-émet immédiatement
+    le même cap (boucle infinie UX).
+    """
+    state: ConversationState = cl.user_session.get("state") or ConversationState()
+    session_id = _resolve_session_id()
+
+    # Reset budget pour cette session : sans ça, un cap_token_budget
+    # ré-firefires immédiatement. Le user a explicitement demandé à
+    # continuer → l'audit trail garde la trace du capped précédent.
+    await budget.reset(session_id)
+
+    msg = cl.Message(content="", author="Agent")
+    await msg.send()
+    turn_state = TurnState(msg=msg)
+
+    turn_gen = run_guarded_turn(state, continuation_prompt, session_id)
+    try:
+        async for event in turn_gen:
+            await dispatch_event(event, turn_state)
+    finally:
+        await turn_gen.aclose()
+        await _drain_orphan_steps(turn_state)
+
+    if turn_state.input_rejected:
+        return
+
+    if not turn_state.linkify_applied:
+        msg.content = linkify_sirens(msg.content or "")
+        turn_state.linkify_applied = True
+        await msg.update()
+
+    badge = model_badge(
+        model_used=turn_state.model_used,
+        escalated=turn_state.escalated,
+        escalation_mode=turn_state.escalation_mode,
+    )
+    msg.content = (msg.content or "") + f"\n\n---\n*Modèle : {badge}*"
+    await msg.update()
+
+    entity = extract_active_entity(turn_state.tracker)
+    await _update_entity_banner(entity)
+
+
+@cl.action_callback("continue_turn")
+async def on_continue_turn(action: cl.Action) -> None:  # noqa: ARG001
+    """Relance le tour avec le même state (vault préservé)."""
+    logger.info("ui_cap_continue_clicked")
+    await _resume_after_cap(_CONTINUE_USER_PROMPT)
+
+
+@cl.action_callback("synthesize_partial")
+async def on_synthesize_partial(action: cl.Action) -> None:  # noqa: ARG001
+    """Demande au LLM une synthèse de l'existant sans nouveau Pappers."""
+    logger.info("ui_cap_synthesize_clicked")
+    await _resume_after_cap(_SYNTHESIZE_USER_PROMPT)
 
 
 @cl.on_chat_end

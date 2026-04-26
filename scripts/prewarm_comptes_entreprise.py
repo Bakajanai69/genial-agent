@@ -49,12 +49,24 @@ YEARS: list[int] = [2022, 2023, 2024]
 def get_balance() -> dict[str, int] | None:
     """Lit le solde Pappers via le sidecar HTTP gratuit
     ``/v2/suivi-jetons``. Retourne ``None`` si la clé n'est pas dispo
-    (mode CI / dry-run sans .env)."""
+    (mode CI / dry-run sans .env).
+
+    Review S09.6 P1-1 : on scrub la clé API de toute exception levée par
+    httpx — sinon ``HTTPStatusError.__str__`` inclut l'URL complète
+    (``?api_token=<KEY>``) et la fuite remonte au terminal / aux logs CI.
+    """
     key = os.getenv("PAPPERS_API_KEY")
     if not key:
         return None
-    r = httpx.get(f"https://api.pappers.fr/v2/suivi-jetons?api_token={key}", timeout=15)
-    r.raise_for_status()
+    try:
+        r = httpx.get(f"https://api.pappers.fr/v2/suivi-jetons?api_token={key}", timeout=15)
+        r.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        # Drop l'URL (qui contient la clé) pour ne garder que le code.
+        raise RuntimeError(f"suivi-jetons HTTP {exc.response.status_code}") from None
+    except httpx.HTTPError as exc:
+        # Idem pour les autres erreurs httpx (timeout, transport…).
+        raise RuntimeError(f"suivi-jetons {type(exc).__name__}") from None
     return r.json()
 
 

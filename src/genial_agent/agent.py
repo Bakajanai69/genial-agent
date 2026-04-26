@@ -367,8 +367,71 @@ async def run_turn(
         # via mcp_pappers.call_tool) et n'incrémentent que
         # ``state.local_lookup_count`` (cap séparé S05).
         tools_schema = tools_schema + LOCAL_PAYLOAD_TOOLS
+
+        # S09.7 Axe 3 C5 — Prompt caching Anthropic 3-couches (tools +
+        # system + messages[-1]).
+        #
+        # Couche (1) tools : on marque le DERNIER tool du préfixe stable
+        # (Pappers + LOCAL_PAYLOAD_TOOLS) comme cacheable. ``cache_control``
+        # sur le dernier tool marque tout le préfixe précédent comme
+        # cachable côté Anthropic. ``extra_tools`` (escalate_to_sonnet
+        # côté Haiku) est ajouté APRÈS ce breakpoint pour ne PAS
+        # invalider le cache à chaque routing decision (Sonnet n'a pas
+        # de extra_tools, Haiku oui — différence binaire suffirait à
+        # busted le cache à chaque switch sinon).
+        if tools_schema:
+            tools_schema = [
+                *tools_schema[:-1],
+                {**tools_schema[-1], "cache_control": {"type": "ephemeral"}},
+            ]
         if extra_tools:
             tools_schema = tools_schema + extra_tools
+
+        # Couche (2) system : converti en liste de blocs avec
+        # ``cache_control`` sur le bloc texte. Anthropic accepte system
+        # en string OU en liste de blocs ; le cache_control n'est
+        # disponible que sur la forme list-of-blocks. Si le préfixe
+        # cumulé tools+system n'atteint pas le min cache (Haiku 4.5 =
+        # 4096 tokens, Sonnet 4.6 = 2048), Anthropic ignore
+        # silencieusement le cache_control — pas d'erreur, juste pas
+        # de gain. À mesurer en phase 6.
+        system_blocks = [
+            {
+                "type": "text",
+                "text": SYSTEM_PROMPT_AGENT,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
+
+        # Couche (3) messages : on marque le DERNIER content block du
+        # DERNIER message de l'historique. Couvre tout l'historique au
+        # tour N+1 (le tour N voit déjà le préfixe tools+system caché).
+        # Pattern documenté Anthropic "Tool use with prompt caching".
+        messages_for_call: list[MessageParam] = list(state.messages)
+        if messages_for_call:
+            last = messages_for_call[-1]
+            content = last.get("content")
+            if isinstance(content, list) and content:
+                # Liste de blocks : marquer le dernier sans muter le state.
+                last_block = content[-1]
+                if isinstance(last_block, dict):
+                    new_content = [
+                        *content[:-1],
+                        {**last_block, "cache_control": {"type": "ephemeral"}},
+                    ]
+                    messages_for_call[-1] = {**last, "content": new_content}
+            elif isinstance(content, str):
+                # String content : convertir en bloc texte avec cache_control.
+                messages_for_call[-1] = {
+                    **last,
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": content,
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ],
+                }
 
         # ``inference_geo`` n'est supporté que sur Sonnet à date (2026-04-24).
         # Haiku rejette avec ``BadRequestError 400 : "<id> does not support
@@ -379,8 +442,8 @@ async def run_turn(
             "model": model_id(tier),
             "max_tokens": max_tokens,
             "temperature": temperature,
-            "system": SYSTEM_PROMPT_AGENT,
-            "messages": state.messages,
+            "system": system_blocks,
+            "messages": messages_for_call,
             "tools": tools_schema,
             "tool_choice": choice,
         }
@@ -446,11 +509,20 @@ async def run_turn(
                     return
 
                 latency_ms = int((time.monotonic() - started) * 1000)
+                # S09.7 — cache_creation_input_tokens / cache_read_input_tokens
+                # exposés par l'API Anthropic (2026). Defaultent à 0 si
+                # le SDK n'expose pas encore les attributs ou si l'usage
+                # n'inclut pas de cache (1er round, ou préfixe sous le
+                # min cache). Pas d'erreur → graceful.
+                cache_creation = getattr(final.usage, "cache_creation_input_tokens", 0) or 0
+                cache_read = getattr(final.usage, "cache_read_input_tokens", 0) or 0
                 yield {
                     "type": "llm_meta",
                     "model": final.model,
                     "input_tokens": final.usage.input_tokens,
                     "output_tokens": final.usage.output_tokens,
+                    "cache_creation_tokens": cache_creation,
+                    "cache_read_tokens": cache_read,
                     "request_id": request_id,
                     "latency_ms": latency_ms,
                     "stop_reason": final.stop_reason or "end_turn",

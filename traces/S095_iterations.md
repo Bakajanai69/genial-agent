@@ -476,3 +476,92 @@ en mode démo (la fixture `_fresh_cache` reste en place pour pytest,
 c'est intentionnel).
 
 Toujours sous le cap mou < 50.
+
+---
+
+## Après S09.7 — Robustesse extraction MCP & UX des caps (2026-04-26)
+
+Phase 2 livrée :
+
+- Axe 1 A2 : `jsonpath-ng` 1.8.0 ajouté en dep, walker délègue aux
+  paths contenant `[*]` / `..` / `[?` / `.*` (`payload_vault.py:_walk`).
+  Le walker simple custom (M1 livré S09.5 post-review) reste sur les
+  paths sans wildcard, conservant la désambiguïsation dict-vs-list.
+- Axe 1 A4 : `_walk_simple` enrichit `_error key missing` avec
+  `_available_keys` (jusqu'à 10 clés) — le LLM peut corriger sans
+  relancer un inspect à l'aveugle.
+- Axe 2 B1 : skeleton annoté `↹` (U+21B9) sur les clés string
+  numériques pures du dict — distingue visuellement string-key vs
+  index pour le LLM.
+- Axe 2 B3 : skeleton expose désormais un sample d'item type dans
+  les arrays de dicts (au lieu du simple `<dict>[N items]`). L'agent
+  voit les vrais champs et choisit le bon path du premier coup.
+- Axe 3 C1 : `MAX_LOCAL_LOOKUPS_PER_TURN` 5 → 10. Compute pur.
+- Axe 3 C2 : `MAX_TOKENS_PER_SESSION` 80K → **200K** (s'aligne sur la
+  context window Sonnet 4.6).
+- Axe 3 C5 : prompt caching Anthropic activé (`cache_control:
+  ephemeral`) sur 3 couches : dernier tool du préfixe stable, system
+  prompt converti en bloc texte, dernier content block du dernier
+  message. ROI mesurable via les nouveaux compteurs
+  `anthropic_cache_creation_tokens` / `anthropic_cache_read_tokens`
+  forwarded dans `llm_meta` et agrégés dans `/stats`.
+- Axe 3 C4 : event `cap_continuation_proposed` émis après chaque
+  `capped` (filtré sur `CONTINUATION_REASON_CODES`). UI Chainlit
+  affiche les actions « 🔄 Continuer » / « 📋 Synthèse partielle ».
+  Handlers `@cl.action_callback` dans `app.py` relancent
+  `run_guarded_turn` sur le même `ConversationState` (vault préservé)
+  avec un prompt de continuation/synthèse + reset budget.
+- Axe 4bis : carte des tools migrée du system prompt
+  (`prompts.py:## Carte des tools Pappers` supprimé, ~30 lignes) vers
+  `DESCRIPTION_OVERRIDES` dans `mcp_pappers.py`. Borne stricte vérifiée
+  par test (aucune mention SIREN spécifique, aucun "pour LVMH fais X").
+- Axe 5 E1+E3 : hint d'introspection itérative étendu (sample →
+  wildcard → search) — pousse l'agent à grep d'abord plutôt qu'à
+  deviner les noms de champs.
+
+### Tests — résultats du run unit + adversarial 2026-04-26
+
+- `make test` (unit) : **582 PASSED** — non-régression complète.
+  Inclut 32 nouveaux tests S09.7 (`test_S097_walker_wildcard.py`,
+  `test_S097_skeleton_sample.py`, `test_S097_walker_error_keys.py`,
+  `test_S097_description_overrides.py`, `test_S097_prompt_caching.py`,
+  `test_S097_cap_continuation_event.py`).
+- `make lint` : ✅ ruff check + ruff format clean.
+- `make test-integration` adversarial : **10/10 effectif** (8/10
+  strict + 2 tolérances documentées : T6 sur bug serveur Pappers
+  `-32602` "Invalid tools/call result" sur entité bidon Zergflorb SAS,
+  introduit côté serveur entre S09.6 et S09.7 — fix S09.8 ; T9 sur
+  pattern de boucle Sonnet "Je vais d'abord rechercher" sur prompt
+  contradictoire chinois — caching n'a pas suffi, à investiguer
+  S09.8). Crédits Pappers consommés : ~22 PAYG (cf. cache pré-warmé).
+- Pack golden G1-G5 : assertions resserrées G2 ≥ 7 SIRENs
+  (S09.6 : ≥ 5), G4 valeur monétaire à proximité de "résultat net"
+  (S09.6 : déjà robuste). Validation live sur 5/5 reportée à un run
+  post-merge (~25 PAYG nécessaires, abo Pappers actuel 0/500 + cache
+  S09.6 partiel).
+
+### Mesure prompt caching (post-S09.7)
+
+À mesurer en run live dédié post-merge (out-of-scope dev phase 2 si
+les crédits Pappers sont contraints) :
+
+- 1er round U3 attendu : `cache_creation` ~3-5 K, `cache_read` 0.
+- 2ème round attendu : `cache_creation` 0, `cache_read` ≥ 30 K
+  (≥ 60 % du préfixe stable).
+- TTFT round 3 G3 attendu ÷ 5-10 (selon doc Anthropic 2026).
+- `cap_token_budget` firefires sur G2/G3 attendu : **0** au cap 200K.
+
+Les compteurs sont en place dans `/stats` (`anthropic_cache_*_tokens`)
+pour observation continue en démo.
+
+### Limites connues laissées à S09.8
+
+- T6_unknown_entity : bug serveur Pappers MCP `-32602` sur entités
+  inexistantes. Options : (a) signaler à Pappers, (b) wrapper côté
+  client pour transformer l'erreur en message lisible.
+- T9_lang_chinese : Sonnet boucle sur des "Je vais d'abord rechercher"
+  sur prompt contradictoire FR/chinois. Probable bug agent (cap
+  d'iter dédié sur boucles d'introduction, ou normalisation de stop
+  conditions).
+- Mesure live ROI prompt caching à acter dans le journal post-merge
+  quand les crédits Pappers permettent un run G1-G5 complet.

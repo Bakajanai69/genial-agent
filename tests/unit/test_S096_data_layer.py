@@ -234,3 +234,126 @@ async def test_no_s3_or_azure_imports() -> None:
     assert "boto3" not in src
     assert "azure" not in src.lower()
     assert "google.cloud" not in src
+
+
+# ── Review S09.6 P1-3 : isolation multi-tenant par owner_id ───────────
+
+
+async def test_owner_isolation_get_thread_denied(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Un thread créé par owner A ne doit PAS être lisible par owner B
+    (régression P1-3 : avant le fix, tous les threads étaient visibles
+    à tous via le user "anonymous" constant)."""
+    import genial_agent.ui.chainlit_data_layer as module
+
+    db = tmp_path / "cl.db"
+    layer = AnonymousSQLiteDataLayer(db_path=str(db))
+    try:
+        # Owner A crée le thread.
+        monkeypatch.setattr(module, "_resolve_owner_id", lambda: "owner-a")
+        await layer.update_thread("t-private", name="LVMH conf")
+        assert (await layer.get_thread("t-private")) is not None
+
+        # Owner B essaie de l'ouvrir → refusé (None comme si inexistant).
+        monkeypatch.setattr(module, "_resolve_owner_id", lambda: "owner-b")
+        assert (await layer.get_thread("t-private")) is None
+    finally:
+        await layer.close()
+
+
+async def test_owner_isolation_list_threads_filters(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``list_threads`` ne renvoie que les threads de l'owner courant
+    (+ les threads "anonymous" legacy pour rétrocompat)."""
+    import genial_agent.ui.chainlit_data_layer as module
+
+    db = tmp_path / "cl.db"
+    layer = AnonymousSQLiteDataLayer(db_path=str(db))
+    try:
+        monkeypatch.setattr(module, "_resolve_owner_id", lambda: "alice")
+        await layer.update_thread("t-alice", name="alice's chat")
+
+        monkeypatch.setattr(module, "_resolve_owner_id", lambda: "bob")
+        await layer.update_thread("t-bob", name="bob's chat")
+
+        # Alice ne voit que son thread.
+        monkeypatch.setattr(module, "_resolve_owner_id", lambda: "alice")
+        page = await layer.list_threads(
+            Pagination(first=10, cursor=None),
+            ThreadFilter(feedback=None, userId=None, search=None),
+        )
+        ids = {t["id"] for t in page.data}
+        assert ids == {"t-alice"}
+
+        # Bob ne voit que le sien.
+        monkeypatch.setattr(module, "_resolve_owner_id", lambda: "bob")
+        page = await layer.list_threads(
+            Pagination(first=10, cursor=None),
+            ThreadFilter(feedback=None, userId=None, search=None),
+        )
+        ids = {t["id"] for t in page.data}
+        assert ids == {"t-bob"}
+    finally:
+        await layer.close()
+
+
+async def test_owner_isolation_delete_thread_denied(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Un owner ne peut pas supprimer le thread d'un autre owner —
+    refus silencieux (Chainlit attend un no-op)."""
+    import genial_agent.ui.chainlit_data_layer as module
+
+    db = tmp_path / "cl.db"
+    layer = AnonymousSQLiteDataLayer(db_path=str(db))
+    try:
+        monkeypatch.setattr(module, "_resolve_owner_id", lambda: "alice")
+        await layer.update_thread("t-alice", name="alice")
+
+        # Bob essaie de supprimer → refusé silencieusement.
+        monkeypatch.setattr(module, "_resolve_owner_id", lambda: "bob")
+        await layer.delete_thread("t-alice")  # ne lève pas
+
+        # Alice voit toujours son thread.
+        monkeypatch.setattr(module, "_resolve_owner_id", lambda: "alice")
+        assert (await layer.get_thread("t-alice")) is not None
+    finally:
+        await layer.close()
+
+
+async def test_legacy_anonymous_threads_visible_to_all(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rétrocompat : les threads pré-fix (user_id="anonymous") restent
+    visibles à tous, sinon les démos en cours après upgrade casseraient.
+    """
+    import genial_agent.ui.chainlit_data_layer as module
+    from genial_agent.ui.chainlit_data_layer import ANONYMOUS_USER_ID
+
+    db = tmp_path / "cl.db"
+    layer = AnonymousSQLiteDataLayer(db_path=str(db))
+    try:
+        # Thread "legacy" créé sous le user anonymous (avant fix).
+        monkeypatch.setattr(module, "_resolve_owner_id", lambda: ANONYMOUS_USER_ID)
+        await layer.update_thread("t-legacy", name="vieux thread")
+
+        # Un nouvel owner ouvre l'app → voit le thread legacy dans la liste.
+        monkeypatch.setattr(module, "_resolve_owner_id", lambda: "alice")
+        page = await layer.list_threads(
+            Pagination(first=10, cursor=None),
+            ThreadFilter(feedback=None, userId=None, search=None),
+        )
+        assert {t["id"] for t in page.data} == {"t-legacy"}
+    finally:
+        await layer.close()
+
+
+async def test_resolve_owner_id_falls_back_outside_chainlit_context() -> None:
+    """``_resolve_owner_id`` doit retourner ``ANONYMOUS_USER_ID`` quand
+    appelé hors contexte Chainlit (cas tests unit, scripts CLI)."""
+    from genial_agent.ui.chainlit_data_layer import (
+        ANONYMOUS_USER_ID,
+        _resolve_owner_id,
+    )
+
+    assert _resolve_owner_id() == ANONYMOUS_USER_ID

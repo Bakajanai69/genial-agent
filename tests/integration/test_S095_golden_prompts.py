@@ -164,13 +164,27 @@ def _has_3y_compare(text: str) -> tuple[bool, str]:
 
 
 def _has_resultat_net_2023(text: str) -> tuple[bool, str]:
-    """S09.6 — assertion resserrée (Q2 user, 2026-04-26).
+    """S09.6 — assertion resserrée (Q2 user, 2026-04-26 ; review P0-2 fix).
 
     Cherche (a) une mention de 'résultat net' / 'bénéfice', (b) l'année
     2023 OU 2024 (l'agent peut citer l'année courante si comptes 2023
-    pas en cache), et (c) **une valeur chiffrée** à proximité du métric
-    (regex ``\\d+[\\s.,]\\d+`` qui couvre les formats "9 587", "9.587",
-    "9,587", "12345"). Repose sur :
+    pas en cache), et (c) **un montant monétaire à proximité de la
+    métrique** — pas n'importe quelle séquence de chiffres (sinon un
+    SIREN ou une année suffirait pour valider, faux positif identifié
+    en review S09.6).
+
+    Critère "montant monétaire" :
+
+    - Soit un nombre avec **séparateur de milliers** (``9 587 500 000``,
+      ``9.587``, ``9,587``).
+    - Soit un nombre suivi d'une **unité monétaire** explicite
+      (``12 M€``, ``9.5 milliards``, ``1234 euros``).
+
+    À proximité = dans une fenêtre ≤ 80 caractères de la métrique
+    (avant ou après) — évite qu'un montant cité 3 paragraphes plus loin
+    sur un autre sujet valide la métrique 2023.
+
+    Repose sur :
 
     1. Fix walker M1 (S09.5 review) → l'agent peut naviguer
        ``$.2023[0].resultat_net`` dans le payload ``comptes-entreprise``.
@@ -188,25 +202,37 @@ def _has_resultat_net_2023(text: str) -> tuple[bool, str]:
         return (False, "pas de mention 'résultat net' / 'bénéfice'")
     if not has_year:
         return (False, "pas de mention de l'année 2023 / 2024")
-    # Cherche un nombre formaté à proximité de la métrique. On scan tout
-    # le texte (pas juste autour du mot) car l'agent peut formuler de
-    # plusieurs façons ; ce qu'on veut éviter c'est un texte qui dit
-    # "le résultat net 2023 n'est pas accessible" SANS chiffre.
-    has_value = bool(re.search(r"\d+[\s.,]\d{3}", text)) or bool(re.search(r"\d{4,}", text))
-    if not has_value:
-        return (False, "pas de valeur chiffrée détectée à proximité du résultat net")
-    return (True, "OK — métrique + année + valeur chiffrée présents")
+
+    # Pattern montant monétaire : (a) chiffres avec séparateur de
+    # milliers (>= 4 chiffres effectifs avec espace/point/virgule au
+    # bon endroit) ou (b) chiffres + unité monétaire explicite.
+    money_pattern = (
+        r"(?:"
+        # (a) Format avec séparateur de milliers : 1 234 / 9.587 / 12,345.67
+        r"\d{1,3}(?:[\s.,]\d{3})+(?:[.,]\d+)?"
+        # (b) Nombre + unité monétaire (M€, milliards, k€, euros…)
+        r"|\d+(?:[.,]\d+)?\s*(?:M€|Md€|k€|€|millions?|milliards?|euros?)"
+        r")"
+    )
+    # Fenêtre ≤ 80 chars autour de la métrique (avant ou après).
+    proximity_pattern = (
+        rf"(?:r[ée]sultat\s+net|b[ée]n[ée]fice)[^.]{{0,80}}?{money_pattern}"
+        rf"|{money_pattern}[^.]{{0,80}}?(?:r[ée]sultat\s+net|b[ée]n[ée]fice)"
+    )
+    if not re.search(proximity_pattern, text, re.IGNORECASE):
+        return (False, "pas de montant monétaire à proximité de 'résultat net'")
+    return (True, "OK — métrique + année + montant monétaire à proximité")
 
 
 # --- Pack G1-G5 -------------------------------------------------------------
 
 GoldenAssertion = Callable[[str], tuple[bool, str]]
-# G2 — cible **resserrée S09.6** (Q2 user, 2026-04-26) : ≥ 5 SIRENs
-# distincts, vs ≥ 3 en S09.5. Le fix walker M1 + cache pré-warmé
-# permet à l'agent d'aller chercher plus loin dans
-# ``resultats[i].entreprises``. Fallback toléré à 4 si
-# ``recherche-dirigeants`` se met aussi à refuser PAYG (non observé
-# au 2026-04-26).
+# G2 — cible **resserrée S09.7** (story §"Critères d'acceptation
+# globaux", 2026-04-26) : ≥ 7 SIRENs distincts, vs ≥ 5 en S09.6.
+# Le wildcard `[*]` (Axe 1 A2) + le sample d'item dans le skeleton
+# (Axe 2 B3) doivent permettre à l'agent d'extraire en 1 call ce
+# qu'il faisait en N — donc d'épuiser plus de homonymes
+# ``resultats[i].entreprises`` dans le même budget.
 # Pappers ``recherche-dirigeants(q="Bernard Arnault")`` retourne ~39
 # homonymes : l'agent Haiku doit (a) disambiguer, (b) extraire les
 # mandats, (c) lister avec SIRENs.
@@ -219,7 +245,7 @@ GOLDEN_PROMPTS: list[tuple[str, str, GoldenAssertion]] = [
     (
         "G2",
         "Quels sont les mandats de Bernard Arnault ?",
-        _has_at_least_n_sirens(5),
+        _has_at_least_n_sirens(7),
     ),
     (
         "G3",

@@ -395,9 +395,12 @@ async def test_healthcheck_ko_contract(monkeypatch: pytest.MonkeyPatch) -> None:
 # ── prewarm_cache (review R1) ────────────────────────────────────────
 
 
-async def test_prewarm_cache_calls_three_seeds() -> None:
-    """Review R1 : les 3 entités officielles sont appelées via
-    ``sirenisateur`` avec le schéma ``{company_name, country_code}``."""
+async def test_prewarm_cache_calls_four_golden_seeds() -> None:
+    """Review S09.6 P1-6 : les 4 entités golden (LVMH, BNP, Carrefour,
+    Casino Guichard) sont appelées via ``sirenisateur`` avec le schéma
+    ``{company_name, country_code}``. Casino ajouté pour aligner sur
+    ``prewarm_comptes_entreprise.py`` et garantir 0 crédit live sur le
+    starter "Compare Carrefour vs Casino"."""
     calls: list[tuple[str, dict[str, Any]]] = []
 
     async def _fake_call(name: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -406,11 +409,11 @@ async def test_prewarm_cache_calls_three_seeds() -> None:
 
     await mcp_pappers.prewarm_cache(call=_fake_call)
 
-    assert len(calls) == 3
+    assert len(calls) == 4
     names_used = [c[0] for c in calls]
     assert all(n == "sirenisateur" for n in names_used)
     seeds = [c[1]["company_name"] for c in calls]
-    assert seeds == ["LVMH", "BNP Paribas", "Carrefour"]
+    assert seeds == ["LVMH", "BNP Paribas", "Carrefour", "Casino Guichard"]
     assert all(c[1]["country_code"] == "FR" for c in calls)
 
 
@@ -425,9 +428,9 @@ async def test_prewarm_cache_swallows_per_seed_errors() -> None:
             raise mcp_pappers.CreditsExhausted("credits")
         return {"isError": False, "content": []}
 
-    # Doit terminer sans lever.
+    # Doit terminer sans lever, et continuer après l'erreur sur BNP.
     await mcp_pappers.prewarm_cache(call=_flaky)
-    assert calls == ["LVMH", "BNP Paribas", "Carrefour"]
+    assert calls == ["LVMH", "BNP Paribas", "Carrefour", "Casino Guichard"]
 
 
 # ── _is_degraded memoization (review C4) ─────────────────────────────

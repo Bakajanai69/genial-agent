@@ -85,13 +85,19 @@ def _resolve_wall_clock_s(default: int = 60) -> int:
 WALL_CLOCK_S = _resolve_wall_clock_s()
 
 # Budget tokens par session (S05) — cf. phase 1 elicitation §Token budget.
-# Bumpé de 50_000 à 80_000 après le smoke test live U3 (S08 notes §D) :
-# le tool ``comptes-entreprise`` retourne ~3 ans de bilans (5-10K tokens
-# / appel) ; cumul rapide en U3 (system prompt durci ~2K + schémas 7
-# tools ~3K + 4-5 tool results lourds ~25-35K + reasoning Sonnet) —
-# 50K était hit dès le 1er tour. 80K offre 1 tour U3 complet + 1
-# follow-up multi-turn ("et son CA ?") sans flap du cap.
-MAX_TOKENS_PER_SESSION = 80_000
+# Bumps successifs :
+#
+# - 50_000 → 80_000 (S08 review post smoke U3) : couvrir 1 U3 + 1
+#   follow-up multi-turn sans flap.
+# - 80_000 → 200_000 (S09.7 phase 2) : s'aligne sur la context window
+#   Sonnet 4.6 (200K). Couplé OBLIGATOIREMENT à l'activation du prompt
+#   caching Anthropic (cf. ``agent.py:run_turn`` cache_control sur
+#   tools + system + messages[-1]) sinon le coût Anthropic explose sur
+#   U3 multi-round. Cache read = 0.1× input price → ROI dès le 2ème
+#   round. Le cap firefires plus rarement, et quand il firefires l'UI
+#   propose un bouton "Continuer" (cap-as-UX-event Axe 3 C4) plutôt
+#   qu'un dead-end conversationnel.
+MAX_TOKENS_PER_SESSION = 200_000
 
 # Stretch vocal (S10) — cahier §19.4 D7
 MAX_BRIEFS_PER_SESSION = 20
@@ -106,8 +112,11 @@ DAILY_PAPPERS_CREDITS_CAP = 100
 # Pappers du tour. On les compte sur un compteur séparé (cf.
 # ``ConversationState.local_lookup_count``).
 #
-# Valeur 5 : couvre largement le cas réaliste (1-3 lookups suffisent
-# d'après la story §"Données factuelles") tout en bornant le coût LLM
-# de prompts pathologiques où l'agent boucle sur des inspects
-# successifs.
-MAX_LOCAL_LOOKUPS_PER_TURN = 5
+# S09.7 — bumpé 5 → 10. Compute pur (vault in-memory), zéro coût €.
+# Le cap 5 firefired sur G4 (LVMH résultat net 2023) où l'agent devait
+# tâtonner pour trouver le bon path à cause du bug walker M1 (fix
+# livré S09.5 post-review) + skeleton pas assez signalétique (fix
+# S09.7 B1+B3). Avec ces deux fixes, 1-3 lookups suffisent en pratique,
+# mais bumper à 10 laisse une marge confortable pour les payloads
+# vraiment exotiques sans transformer un cas-limite en dead-end.
+MAX_LOCAL_LOOKUPS_PER_TURN = 10

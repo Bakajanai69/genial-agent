@@ -26,29 +26,32 @@ from genial_agent.mcp_pappers import (
 
 
 def test_mapping_minimal_shape() -> None:
-    """Exemple avec un outil effectivement retenu (review R3 : avant le
-    fix, l'exemple citait ``informations-entreprise`` qui est justement
-    exclu de ``RETAINED_TOOLS`` — incohérent pour un lecteur froid)."""
+    """Exemple avec un outil retenu mais **sans override S09.7** pour
+    isoler le contrat de mapping pur (review R3 historique : avant le
+    fix S02, l'exemple citait ``informations-entreprise`` exclu de
+    ``RETAINED_TOOLS`` — incohérent. On utilise désormais
+    ``conformite-personne-physique`` qui est retenu et n'a pas d'entrée
+    dans ``DESCRIPTION_OVERRIDES``)."""
     tools = [
         PappersTool(
-            name="recherche-entreprises",
-            description="Recherche d'entreprises françaises par critères",
+            name="conformite-personne-physique",
+            description="Vérification KYC d'une personne physique.",
             input_schema={
                 "type": "object",
-                "properties": {"query": {"type": "string"}},
-                "required": ["query"],
+                "properties": {"nom": {"type": "string"}},
+                "required": ["nom"],
             },
         )
     ]
     out = to_anthropic_schema(tools)
     assert out == [
         {
-            "name": "recherche-entreprises",
-            "description": "Recherche d'entreprises françaises par critères",
+            "name": "conformite-personne-physique",
+            "description": "Vérification KYC d'une personne physique.",
             "input_schema": {
                 "type": "object",
-                "properties": {"query": {"type": "string"}},
-                "required": ["query"],
+                "properties": {"nom": {"type": "string"}},
+                "required": ["nom"],
             },
         }
     ]

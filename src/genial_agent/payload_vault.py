@@ -64,6 +64,24 @@ PREVIEW_TAIL_CHARS = 400
 SKELETON_MAX_DEPTH = 3
 SKELETON_MAX_KEYS_PER_LEVEL = 30
 
+# S09.7 A4 — quand ``_walk_simple`` retourne ``_error key missing``, on
+# liste les clés disponibles du nœud parent pour aider le LLM à se
+# corriger. Cap à 10 pour éviter qu'un dict à 100 clés explose la
+# fenêtre de contexte.
+AVAILABLE_KEYS_LIMIT = 10
+
+# S09.7 B1 — marqueur lisible apposé en suffixe d'une clé string
+# numérique pure dans le squelette (``"2023" → "2023↹"``). Distingue
+# string-key vs index pour le LLM. ``↹`` (U+21B9) est neutre (pas de
+# balise XML, pas d'instruction). Cf. story §"Architecture phase 1 — Axe
+# 2 B1".
+DIGIT_STRING_KEY_MARKER = "↹"
+
+# S09.7 B3 — sample d'item type dans les arrays de dicts. On expose les
+# vrais champs du 1er item au lieu d'un simple ``<dict>[N items]``,
+# pour que le LLM choisisse le bon path du premier coup.
+SKELETON_SAMPLE_KEYS_LIMIT = 8
+
 # Limite sur la taille de la regex que l'agent peut envoyer. Évite des
 # patterns absurdement longs (prompt injection indirecte ou bug LLM).
 MAX_REGEX_PATTERN_CHARS = 200
@@ -113,6 +131,12 @@ def build_index(raw: str, payload_id: str) -> dict[str, Any]:
     (squelette à profondeur N, tailles d'arrays, previews head/tail).
     Sortie compacte (< ``INDEX_BUDGET_CHARS``), prête à être injectée
     dans un ``tool_result`` Anthropic à la place du payload brut.
+
+    S09.7 enrichissements :
+
+    - skeleton avec sample d'item dans les arrays de dicts (B3) +
+      annotation ``↹`` sur les clés numériques pures de dict (B1).
+    - hint d'introspection itérative : sample → wildcard → search (E1+E3).
     """
     parsed = _safe_parse_json(raw)
     index: dict[str, Any] = {
@@ -123,10 +147,22 @@ def build_index(raw: str, payload_id: str) -> dict[str, Any]:
         "_preview_head": raw[:PREVIEW_HEAD_CHARS],
         "_preview_tail": raw[-PREVIEW_TAIL_CHARS:] if len(raw) > PREVIEW_HEAD_CHARS else "",
         "_inspect_hint": (
-            "Use payload_inspect(payload_id, json_path) to read a specific subtree, "
-            "or payload_search(payload_id, pattern) to grep the raw JSON. "
-            "Path syntax: '$.foo.bar[42].baz' or 'foo.bar[42].baz'. "
-            "Indices are 0-based; use -1 for the last element."
+            "Use payload_inspect(payload_id, json_path) to read a specific "
+            "subtree, or payload_search(payload_id, pattern) to grep the raw "
+            "JSON. Path syntax: '$.foo.bar[42].baz', wildcard "
+            "'$.arr[*].field' (returns array of all matches), recursive "
+            "descent '$..key', negative index '$.arr[-1]' (last item). "
+            "A numeric segment on a dict is a string-key (e.g. '$.2023[0]' "
+            "on date-keyed payloads, marked with '"
+            + DIGIT_STRING_KEY_MARKER
+            + "' in the skeleton); on a list it's an integer index. "
+            "Recommended pattern for an array of objects: (1) read the "
+            "field names from the sample shown in the skeleton, (2) "
+            "extract everything in one call via wildcard "
+            "'$.arr[*].chosen_field' instead of N inspects by index. "
+            "(3) If no field has the expected name, payload_search with a "
+            'regex on raw JSON keys (e.g. \'"key_a"|"key_b"\') to find '
+            "the actual key name used by the upstream API."
         ),
     }
     encoded = json.dumps(index, ensure_ascii=False)
@@ -232,22 +268,56 @@ def _safe_parse_json(raw: str) -> Any:
         return {"_raw": raw[:1000], "_note": "payload non-JSON"}
 
 
+def _is_digit_string_key(k: Any) -> bool:
+    """``True`` si ``k`` est une string qui ressemble à un nombre pur
+    (clé string numérique d'un dict — ex: ``"2023"``, ``"-1"``, ``"0"``).
+
+    On accepte le signe ``-`` en tête (pour rester cohérent avec la
+    syntaxe d'index négatif côté list), bien que ce soit rare en
+    pratique côté JSON.
+    """
+    return isinstance(k, str) and k.lstrip("-").isdigit()
+
+
 def _skeleton(node: Any, depth: int) -> Any:
+    """Squelette structurel borné en profondeur.
+
+    Modifié S09.7 :
+
+    - **B1** : préfixe la clé string numérique pure du dict par
+      ``↹`` (U+21B9) pour signaler "string-key, pas index" au LLM.
+      Couvre le piège G4 ``$.2023[0]`` qui était mal interprété.
+    - **B3** : pour un array de dicts, expose un sample du 1er item
+      (clés visibles, valeurs résumées) au lieu du simple
+      ``<dict>[N items]``. Le LLM choisit le bon path du premier coup
+      sans avoir à inspect par index pour découvrir les champs.
+    """
     if depth >= SKELETON_MAX_DEPTH:
         return _summarize(node)
     if isinstance(node, dict):
         items = list(node.items())[:SKELETON_MAX_KEYS_PER_LEVEL]
-        return {k: _skeleton(v, depth + 1) for k, v in items}
+        out: dict[Any, Any] = {}
+        for k, v in items:
+            display_k = f"{k}{DIGIT_STRING_KEY_MARKER}" if _is_digit_string_key(k) else k
+            out[display_k] = _skeleton(v, depth + 1)
+        return out
     if isinstance(node, list):
         if not node:
             return []
-        # Pour un array, on résume en "<type>[N items]" plutôt que de
-        # descendre — c'est ``_collect_array_sizes`` qui donne le N
-        # exact. L'agent navigue ensuite via ``payload_inspect`` sur
-        # ``arr[0]`` pour voir un sample, puis ``arr[N-1]`` pour la
-        # queue (paterne typique : tri croissant chronologique côté
-        # serveur upstream).
-        return [f"<{type(node[0]).__name__}>[{len(node)} items]"]
+        first = node[0]
+        if isinstance(first, dict):
+            sample_keys = list(first.keys())[:SKELETON_SAMPLE_KEYS_LIMIT]
+            sample = {k: _summarize(first[k]) for k in sample_keys}
+            if len(node) > 1:
+                return [sample, f"…{len(node) - 1} more dict items"]
+            return [sample]
+        if isinstance(first, list):
+            if len(node) > 1:
+                return [f"<nested list[{len(first)}]>", f"…{len(node) - 1} more lists"]
+            return [f"<nested list[{len(first)}]>"]
+        # Array de scalaires (str / int / etc.) : on garde la sémantique
+        # historique « <type>[N items] » qui suffit largement.
+        return [f"<{type(first).__name__}>[{len(node)} items]"]
     return _summarize(node)
 
 
@@ -291,8 +361,36 @@ def _collect_array_sizes(
 # ``.`` initiaux pour accepter à la fois ``$.foo[0]`` et ``foo[0]``.
 _PATH_SEGMENT = re.compile(r"([^.\[\]]+)|\[(-?\d+)\]")
 
+# S09.7 A2 — tokens qui déclenchent la délégation à ``jsonpath-ng``
+# pour les expressions wildcards / recursive descent / filtres. Tout
+# path qui en contient un sort du walker custom.
+_JSONPATH_WILDCARD_TOKENS = ("[*]", "..", "[?", ".*")
+
 
 def _walk(node: Any, path: str) -> Any:
+    """Walk avec délégation conditionnelle à ``jsonpath-ng``.
+
+    - Path **sans** wildcard (le cas le plus fréquent côté LLM) →
+      ``_walk_simple`` (M1 livré S09.5) avec désambiguïsation
+      dict-vs-list par contexte.
+    - Path **avec** ``[*]`` / ``..`` / ``[?`` / ``.*`` → délégué à
+      ``jsonpath-ng`` (S09.7 Axe 1 A2). Permet à l'agent d'extraire en
+      1 call ce qu'il faisait en N (ex : ``$.results[*].id`` sur un
+      retour upstream qui contient un array d'objets).
+
+    Sécurité : la lib jsonpath-ng vendore ``ply`` (parser) sans pickle
+    depuis 1.8.0 (CVE-2025-56005 patchée). Aucun accès filesystem ni
+    aux attributs Python d'un objet. ``parse()`` peut lever sur path
+    invalide → on renvoie ``_error`` pour que le LLM se corrige.
+    """
+    if not isinstance(path, str):
+        return {"_error": f"json_path must be a string, got {type(path).__name__}"}
+    if any(tok in path for tok in _JSONPATH_WILDCARD_TOKENS):
+        return _walk_with_jsonpath_ng(node, path)
+    return _walk_simple(node, path)
+
+
+def _walk_simple(node: Any, path: str) -> Any:
     """Walk ``$.foo.bar[0].baz`` ou ``foo.bar[0].baz`` ou ``arr[-1]``.
 
     Désambiguïsation **par contexte** : un segment numérique pur
@@ -313,9 +411,11 @@ def _walk(node: Any, path: str) -> Any:
     dict ordinaire, soit comme un index entier de list. Si la clé est
     introuvable ou l'index hors range → retour ``{"_error": "..."}``
     pour que le LLM puisse réajuster.
+
+    S09.7 A4 : sur ``key missing``, on liste les clés disponibles du
+    nœud parent (jusqu'à ``AVAILABLE_KEYS_LIMIT``) — le LLM peut
+    corriger sans relancer un inspect à l'aveugle.
     """
-    if not isinstance(path, str):
-        return {"_error": f"json_path must be a string, got {type(path).__name__}"}
     cleaned = path.lstrip("$").lstrip(".")
     if not cleaned:
         return node
@@ -325,38 +425,72 @@ def _walk(node: Any, path: str) -> Any:
 
     cur: Any = node
     for seg in segments:
+        # S09.7 B1 : si le LLM a recopié l'annotation ``↹`` du skeleton,
+        # on la strip avant de matcher la clé du dict. Tolérance pour
+        # éviter de pénaliser un agent qui aurait copié-collé.
+        seg_clean = seg.rstrip(DIGIT_STRING_KEY_MARKER) if isinstance(seg, str) else seg
         if isinstance(cur, dict):
             # Dict : segment toujours interprété comme clé string, même
             # numérique pur. Couvre les mappings à clés numériques type
             # ``{"2023": [...]}``.
-            if seg in cur:
-                cur = cur[seg]
+            if seg_clean in cur:
+                cur = cur[seg_clean]
             else:
-                return {"_error": f"key '{seg}' missing at '{path}'"}
+                return {
+                    "_error": f"key '{seg_clean}' missing at '{path}'",
+                    "_available_keys": [str(k) for k in list(cur.keys())[:AVAILABLE_KEYS_LIMIT]],
+                }
         elif isinstance(cur, list):
             # List : segment doit être un index entier (signé pour -1).
-            if not seg.lstrip("-").isdigit():
+            if not seg_clean.lstrip("-").isdigit():
                 return {
                     "_error": (
-                        f"list expects integer index, got '{seg}' at '{path}' "
+                        f"list expects integer index, got '{seg_clean}' at '{path}' "
                         f"(list has {len(cur)} items)"
                     )
                 }
             try:
-                idx = int(seg)
+                idx = int(seg_clean)
             except ValueError:
-                return {"_error": f"invalid index '{seg}' at '{path}'"}
+                return {"_error": f"invalid index '{seg_clean}' at '{path}'"}
             if idx < 0:
                 idx += len(cur)
             if idx < 0 or idx >= len(cur):
-                return {"_error": f"index {seg} out of range at '{path}'"}
+                return {"_error": f"index {seg_clean} out of range at '{path}'"}
             cur = cur[idx]
         else:
             # Scalaire (str/int/None/...) : impossible de naviguer plus loin.
             return {
                 "_error": (
                     f"cannot navigate into {type(cur).__name__} at '{path}' "
-                    f"(remaining segment '{seg}')"
+                    f"(remaining segment '{seg_clean}')"
                 )
             }
     return cur
+
+
+def _walk_with_jsonpath_ng(node: Any, path: str) -> Any:
+    """Délègue à ``jsonpath-ng.ext`` pour les paths à wildcards.
+
+    Retourne :
+
+    - la valeur unique si ``len(matches) == 1`` (plus ergonomique pour le
+      LLM — pas de confusion list-vs-scalar),
+    - la liste de valeurs si ``len(matches) >= 2``,
+    - ``{"_error": ...}`` si parse error / 0 match.
+
+    Lazy import : on évite +50 ms de startup pour les sessions qui
+    n'utilisent jamais de wildcard.
+    """
+    from jsonpath_ng.ext import parse  # lazy import
+
+    try:
+        expr = parse(path)
+    except Exception as exc:  # noqa: BLE001 — parse error LLM, on remonte propre
+        return {"_error": f"invalid jsonpath '{path}': {exc}"}
+    matches = [m.value for m in expr.find(node)]
+    if not matches:
+        return {"_error": f"no match for '{path}' in payload"}
+    if len(matches) == 1:
+        return matches[0]
+    return matches

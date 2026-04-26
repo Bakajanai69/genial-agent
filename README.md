@@ -125,10 +125,15 @@ mcp.pappers.fr/{API_KEY}
 
 - **6 couches** garde-fous : input gate (regex anti-injection 2026 sur
   texte normalisé NFKD), system prompt durci, Claude safety native,
-  execution caps (7 tool calls Pappers / 5 lookups locaux Payload Vault
-  / 60 s wall-clock / 80 K tokens-per-session), output validator
+  execution caps (7 tool calls Pappers / 10 lookups locaux Payload Vault
+  / 60 s wall-clock / 200 K tokens-per-session), output validator
   déterministe (Luhn SIREN + bilan horodaté + advisory reframing),
   Haiku-critic async non-bloquant.
+- **Cap-as-UX-event** (S09.7) : tout cap firefired émet un event
+  `cap_continuation_proposed` qui expose dans la UI Chainlit les
+  actions « 🔄 Continuer » / « 📋 Synthèse partielle » plutôt qu'un
+  dead-end conversationnel. Le contexte (Payload Vault inclus) est
+  préservé sur le `ConversationState` session-scoped.
 - **Pack adversarial 10 prompts** exécutés automatiquement,
   rapport : [`docs/adversarial-run.md`](docs/adversarial-run.md)
   (généré par `tests/integration/test_S09_adversarial.py`).
@@ -139,13 +144,16 @@ mcp.pappers.fr/{API_KEY}
 
 ## Next steps (si prod)
 
-1. **Anthropic prompt caching** (`cache_control` sur `system` +
-   `tools` + dernier `messages` block) — coupe TTFT 5-10× et
-   ramène le wall-clock cap S04 de 60 s à 30 s. Effort ~1 h.
-   Vrai fix produit du flap `WALL_CLOCK_S 30→60 s` noté en
-   review S08 §B1bis. Aussi : retire `T9_lang_chinese` du set
-   `TOLERATED` du runner adversarial (cf.
-   `tests/integration/test_S09_adversarial.py`).
+1. ~~**Anthropic prompt caching**~~ — **livré dans S09.7**
+   (`cache_control: ephemeral` sur tools + system + messages[-1]
+   dans [`agent.py:run_turn`](src/genial_agent/agent.py)). Couple
+   les compteurs `anthropic_cache_creation_tokens` /
+   `anthropic_cache_read_tokens` exposés dans `/stats` pour mesurer
+   le ROI en continu. Permet le bump `MAX_TOKENS_PER_SESSION`
+   80 K → 200 K (s'aligne sur la context window Sonnet 4.6) sans
+   exploser la facturation. À noter : `T9_lang_chinese` reste dans
+   `TOLERATED` malgré le caching — la cause racine était un comportement
+   Sonnet (boucle "Je vais d'abord rechercher") indépendant du TTFT.
 2. ~~**Slicing intelligent `comptes-entreprise`**~~ — **livré dans
    S09.5** ([`payload_vault.py`](src/genial_agent/payload_vault.py) +
    tools locaux `payload_inspect` / `payload_search`). Offload
