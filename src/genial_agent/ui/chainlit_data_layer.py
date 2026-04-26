@@ -257,15 +257,20 @@ class AnonymousSQLiteDataLayer(BaseDataLayer):
     # ── Users ────────────────────────────────────────────────────────
 
     async def get_user(self, identifier: str) -> PersistedUser | None:
-        """Toujours retourne le user ``anonymous`` constant — pas d'auth.
+        """Retourne un PersistedUser avec ``identifier`` = ce que l'auth
+        callback a posé (cookie ``genial_owner_id`` ou fallback éphémère
+        ``anon-<hex>``).
 
-        Chainlit appelle ce hook en lookup avant ``create_user``. On
-        renvoie un user fictif déjà persisté pour court-circuiter le flow
-        d'inscription.
+        S09.7 hotfix v3 : auparavant cette méthode retournait TOUJOURS
+        ``ANONYMOUS_USER_ID`` constant, ce qui forçait tous les threads
+        créés par Chainlit à user_id="anonymous" → visibles cross-user
+        (chaque visiteur voyait les threads de tous les autres). Le fix
+        propage l'identifier réel du visiteur (cookie UUID) pour que
+        l'isolation par-visiteur fonctionne vraiment.
         """
         return PersistedUser(
-            id=ANONYMOUS_USER_ID,
-            identifier=ANONYMOUS_USER_ID,
+            id=identifier,
+            identifier=identifier,
             createdAt=_now_iso(),
             display_name="Utilisateur",
             metadata={},
@@ -289,12 +294,13 @@ class AnonymousSQLiteDataLayer(BaseDataLayer):
             row = await cur.fetchone()
         if row is None:
             return None
-        # Isolation owner : un thread sans user_id (legacy) reste lisible
-        # par tous (rétrocompat), mais un thread attribué à un owner
-        # spécifique n'est lisible que par cet owner.
+        # S09.7 hotfix v3 : isolation **stricte** par owner. Un thread
+        # n'est lisible que par son owner — plus de "rétrocompat legacy"
+        # qui exposait les threads sans user_id à tout le monde (cause
+        # de la fuite cross-visiteur observée 2026-04-26).
         owner = _resolve_owner_id()
         thread_owner = row["user_id"]
-        if thread_owner and thread_owner != owner:
+        if thread_owner != owner:
             logger.info(
                 "chainlit_data_layer_thread_access_denied",
                 thread_id=thread_id,
@@ -407,16 +413,19 @@ class AnonymousSQLiteDataLayer(BaseDataLayer):
         appliqué si présent ; ``feedback`` est ignoré (pas de feedback
         granulaire en démo).
 
-        Review S09.6 P1-3 : on filtre par ``owner_id`` de la session
-        courante. Les threads "anonymous" (legacy / dev) restent visibles
-        à tous pour rétrocompat.
+        S09.6 P1-3 + S09.7 hotfix v3 : on filtre **strictement** par
+        ``owner_id`` de la session courante. Auparavant on incluait
+        aussi les threads ``user_id="anonymous"`` "pour rétrocompat
+        legacy" — mais ça causait une fuite cross-visiteur (tous les
+        threads créés avant le fix v3 avaient user_id="anonymous"
+        à cause d'un bug dans ``get_user``).
         """
         conn = await self._get_conn()
         limit = max(1, pagination.first or 20)
         owner = _resolve_owner_id()
 
-        sql = "SELECT * FROM threads WHERE (user_id = ? OR user_id = ?)"
-        params: list[Any] = [owner, ANONYMOUS_USER_ID]
+        sql = "SELECT * FROM threads WHERE user_id = ?"
+        params: list[Any] = [owner]
         if filters.search:
             sql += " AND name LIKE ?"
             params.append(f"%{filters.search}%")

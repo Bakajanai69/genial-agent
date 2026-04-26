@@ -29,13 +29,20 @@ async def layer(tmp_path):
     await layer.close()
 
 
-async def test_get_user_returns_anonymous_constant(layer: AnonymousSQLiteDataLayer) -> None:
-    """``get_user`` ignore l'identifier passé : tout le monde est
-    ``anonymous``. C'est intentionnel (mode démo single-tenant)."""
-    user = await layer.get_user("ignored-identifier")
+async def test_get_user_propagates_identifier(layer: AnonymousSQLiteDataLayer) -> None:
+    """S09.7 hotfix v3 : ``get_user`` propage l'identifier passé
+    (cookie UUID ou fallback éphémère) au lieu d'écraser avec
+    ``ANONYMOUS_USER_ID``. Sans ça, tous les threads étaient sous
+    user_id="anonymous" → fuite cross-visiteur (chaque visiteur
+    voyait les threads de tous les autres)."""
+    user = await layer.get_user("cookie-uuid-abc123")
     assert user is not None
-    assert user.id == ANONYMOUS_USER_ID
-    assert user.identifier == ANONYMOUS_USER_ID
+    assert user.id == "cookie-uuid-abc123"
+    assert user.identifier == "cookie-uuid-abc123"
+    # Fallback éphémère préfixé "anon-" doit aussi être propagé
+    user2 = await layer.get_user("anon-deadbeef")
+    assert user2 is not None
+    assert user2.identifier == "anon-deadbeef"
 
 
 async def test_create_thread_via_update_then_fetch(
@@ -321,11 +328,13 @@ async def test_owner_isolation_delete_thread_denied(
         await layer.close()
 
 
-async def test_legacy_anonymous_threads_visible_to_all(
+async def test_legacy_anonymous_threads_invisible_to_other_owners(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Rétrocompat : les threads pré-fix (user_id="anonymous") restent
-    visibles à tous, sinon les démos en cours après upgrade casseraient.
+    """S09.7 hotfix v3 : les threads "legacy" sous user_id="anonymous"
+    (créés à cause du bug ``get_user`` qui retournait toujours
+    ``ANONYMOUS_USER_ID``) ne sont **plus** visibles à un nouvel owner.
+    Auparavant ils l'étaient "pour rétrocompat" → fuite cross-visiteur.
     """
     import genial_agent.ui.chainlit_data_layer as module
     from genial_agent.ui.chainlit_data_layer import ANONYMOUS_USER_ID
@@ -333,17 +342,28 @@ async def test_legacy_anonymous_threads_visible_to_all(
     db = tmp_path / "cl.db"
     layer = AnonymousSQLiteDataLayer(db_path=str(db))
     try:
-        # Thread "legacy" créé sous le user anonymous (avant fix).
+        # Thread "legacy" créé sous le user anonymous (avant fix v3).
         monkeypatch.setattr(module, "_resolve_owner_id", lambda: ANONYMOUS_USER_ID)
         await layer.update_thread("t-legacy", name="vieux thread")
 
-        # Un nouvel owner ouvre l'app → voit le thread legacy dans la liste.
+        # Un nouvel owner (alice) ouvre l'app → ne voit PAS le thread
+        # legacy (isolation stricte par-owner).
         monkeypatch.setattr(module, "_resolve_owner_id", lambda: "alice")
         page = await layer.list_threads(
             Pagination(first=10, cursor=None),
             ThreadFilter(feedback=None, userId=None, search=None),
         )
-        assert {t["id"] for t in page.data} == {"t-legacy"}
+        assert {t["id"] for t in page.data} == set(), (
+            "alice ne doit pas voir les threads legacy anonymous (isolation "
+            "stricte S09.7 hotfix v3)"
+        )
+        # Mais l'owner "anonymous" lui-même (cas dégénéré) les voit toujours.
+        monkeypatch.setattr(module, "_resolve_owner_id", lambda: ANONYMOUS_USER_ID)
+        page2 = await layer.list_threads(
+            Pagination(first=10, cursor=None),
+            ThreadFilter(feedback=None, userId=None, search=None),
+        )
+        assert {t["id"] for t in page2.data} == {"t-legacy"}
     finally:
         await layer.close()
 
