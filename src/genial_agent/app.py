@@ -19,6 +19,7 @@ plutôt que par redéfinition du décorateur.
 from __future__ import annotations
 
 import asyncio
+import re as _re_module
 import uuid
 
 import chainlit as cl
@@ -106,6 +107,52 @@ def get_data_layer() -> AnonymousSQLiteDataLayer:
     baké dans Docker + monté sur le volume Railway au runtime.
     """
     return AnonymousSQLiteDataLayer(db_path=_CL_DB_PATH)
+
+
+# S09.7 hotfix : Chainlit n'invoque ``data_layer.list_threads`` (et
+# donc n'affiche pas la sidebar des conversations passées) **que si un
+# ``cl.User`` est défini**. Sans ``header_auth_callback`` /
+# ``password_auth_callback``, l'user reste None et la sidebar est
+# inaccessible — c'est pour ça qu'on observait "aucune conversation
+# passée" malgré le data layer + volume + cookie en place.
+#
+# On ajoute donc un ``header_auth_callback`` qui retourne **toujours**
+# un ``cl.User`` :
+# - identifier = cookie ``genial_owner_id`` posé par
+#   ``public/owner-cookie.js`` côté navigateur (durable cross-session
+#   cross-refresh, persisté en localStorage)
+# - fallback ``anon-<uuid>`` éphémère si le cookie n'est pas encore
+#   posé (1er pageload avant que le JS ait tourné).
+#
+# Aucune authentification réelle (pas de password, pas d'OAuth) — c'est
+# uniquement pour activer la sidebar Chainlit avec un identifiant
+# persistant côté navigateur. Cohérent avec le mode "anonymous user"
+# documenté en S09.6 (data_layer P1-3).
+_OWNER_COOKIE_RE_AUTH = _re_module.compile(r"\bgenial_owner_id=([A-Za-z0-9-]{8,64})")
+
+
+@cl.header_auth_callback
+def auth_callback(headers: object) -> cl.User | None:
+    """Authentifie le visiteur via le cookie ``genial_owner_id``.
+
+    Toujours retourne un User (jamais None) pour que Chainlit active
+    la sidebar conversations. L'identifier est l'UUID du cookie quand
+    présent, sinon un UUID éphémère ``anon-<hex16>``.
+    """
+    cookie_header = headers.get("cookie", "") if hasattr(headers, "get") else ""
+    match = _OWNER_COOKIE_RE_AUTH.search(cookie_header) if cookie_header else None
+    if match:
+        return cl.User(
+            identifier=match.group(1),
+            metadata={"source": "cookie", "persistent": True},
+        )
+    # Fallback éphémère : 1er pageload avant que owner-cookie.js ait tourné.
+    # Le 2ème pageload récupèrera le cookie et l'identifier sera stable.
+    fallback = f"anon-{uuid.uuid4().hex[:16]}"
+    return cl.User(
+        identifier=fallback,
+        metadata={"source": "fallback", "persistent": False},
+    )
 
 
 def _resolve_session_id() -> str:

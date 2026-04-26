@@ -85,22 +85,37 @@ def _resolve_owner_id() -> str:
     """Retourne l'``owner_id`` de la session courante, ou
     ``ANONYMOUS_USER_ID`` en fallback (hors contexte Chainlit).
 
-    Ordre de priorité (S09.7 hotfix) :
+    Ordre de priorité (S09.7 hotfix v2 — auth callback) :
 
-    1. **Cookie HTTP ``genial_owner_id``** posé par ``public/owner-cookie.js``
-       depuis ``localStorage`` côté navigateur. Persiste cross-session
-       et cross-refresh, c'est l'identité durable du visiteur.
-    2. **``cl.user_session.get(SESSION_OWNER_KEY)``** — UUID éphémère
-       par-session-WebSocket (fallback si JS bloqué ou cookie pas
-       encore posé au tout 1er pageload).
-    3. **``ANONYMOUS_USER_ID``** — hors contexte Chainlit (tests unit).
+    1. **``cl.user_session.get("user").identifier``** — User retourné
+       par ``app.py:auth_callback`` (`@cl.header_auth_callback`), qui
+       lit le cookie ``genial_owner_id`` posé par
+       ``public/owner-cookie.js``. C'est la **source d'identité
+       durable** du visiteur (cross-session, cross-refresh).
+       L'auth callback est ce qui permet à Chainlit d'invoquer
+       ``data_layer.list_threads`` et donc d'afficher la sidebar.
+    2. **Cookie HTTP direct** lu via ``cl.context.session.environ`` —
+       fallback si l'auth callback n'a pas encore tourné (timing
+       race au tout 1er pageload).
+    3. **``cl.user_session.get(SESSION_OWNER_KEY)``** — UUID éphémère
+       par-session-WebSocket, fallback historique S09.6.
+    4. **``ANONYMOUS_USER_ID``** — hors contexte Chainlit (tests unit).
 
     Import tardif de ``chainlit`` : le data layer est importable hors
-    contexte Chainlit (tests unit, scripts), et ``cl.user_session`` lève
-    ``ChainlitContextException`` (pas un ``LookupError``) si appelée hors
-    WebSocket. On catch large (``Exception``).
+    contexte Chainlit (tests unit, scripts).
     """
-    # 1. Cookie persistant côté navigateur.
+    # 1. User Chainlit standard (posé par auth_callback).
+    try:
+        import chainlit as cl
+
+        user = cl.user_session.get("user")
+        identifier = getattr(user, "identifier", None)
+        if isinstance(identifier, str) and identifier:
+            return identifier
+    except Exception:  # noqa: BLE001, S110 — fallback
+        pass
+
+    # 2. Cookie HTTP direct (au cas où auth_callback pas encore appliqué).
     try:
         import chainlit as cl
 
@@ -110,20 +125,20 @@ def _resolve_owner_id() -> str:
             match = _OWNER_COOKIE_RE.search(cookies)
             if match:
                 return match.group(1)
-    except Exception:  # noqa: BLE001, S110 — fallback sur les autres sources
+    except Exception:  # noqa: BLE001, S110
         pass
 
-    # 2. UUID éphémère par-session-WebSocket (fallback historique).
+    # 3. UUID éphémère par-session-WebSocket (fallback historique S09.6).
     try:
         import chainlit as cl
 
         owner = cl.user_session.get(SESSION_OWNER_KEY)
         if isinstance(owner, str) and owner:
             return owner
-    except Exception:  # noqa: BLE001, S110 — fallback silencieux hors contexte Chainlit
+    except Exception:  # noqa: BLE001, S110
         pass
 
-    # 3. Hors contexte (tests unit, scripts).
+    # 4. Hors contexte (tests unit, scripts).
     return ANONYMOUS_USER_ID
 
 
