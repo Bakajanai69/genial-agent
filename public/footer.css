@@ -20,9 +20,10 @@
 
 /* ─── S09.7 UI : anti-FOUC + thème dark immédiat ────────────────────
    Force le fond noir AVANT que React applique le thème, pour éviter
-   le flash blanc au tout 1er pageload (le custom JS owner-cookie.js
-   fait la même chose en JS, on cumule les 2 mécanismes pour un anti-
-   FOUC robuste). */
+   le flash blanc au tout 1er pageload. Le custom JS owner-cookie.js
+   pose en plus un splash screen overlay full-screen qui masque tous
+   les re-renders Chainlit intermédiaires (auth → reauth → React
+   mount → render initial → render final) pendant ~1200 ms. */
 html, body {
     background-color: #0a0a0a !important;
 }

@@ -44,33 +44,72 @@
         // A. Fond noir immédiat (avant React mount).
         document.documentElement.style.backgroundColor = "#0a0a0a";
 
-        // B. Inject un style inline qui hide le body avec fade-in.
-        //    Le custom CSS (footer.css) charge en parallèle du bundle
-        //    Chainlit, parfois trop tard pour le 1er paint. Inject
-        //    inline ici garantit que c'est appliqué AVANT le 1er paint.
-        const foucGuard = document.createElement("style");
-        foucGuard.id = "__genial_fouc_guard__";
-        foucGuard.textContent = `
-            html, body { background-color: #0a0a0a !important; }
-            body { opacity: 0; transition: opacity 0.45s ease-in; }
-            body.genial-revealed { opacity: 1; }
-        `;
-        if (document.head) {
-            document.head.appendChild(foucGuard);
-        }
+        // B. Splash screen overlay full-screen — masque TOUS les
+        //    re-renders Chainlit intermédiaires en navigation privée
+        //    (pas de cache assets) : auth initial sans cookie →
+        //    cookie posé → re-auth → React mount → premier render →
+        //    sidebar inject → starters apparaissent. Sans splash,
+        //    l'utilisateur voit chacune de ces étapes successivement.
+        //
+        //    Stratégie alternative essayée (commit f26732b, fade-in
+        //    body opacity:0) : insuffisante en navigation privée car
+        //    plusieurs re-renders dépassent le délai de 350 ms.
+        //
+        //    Splash visible avec logo + texte "Chargement…" → UX
+        //    cohérente "loading state" plutôt que "page cassée".
+        const splash = document.createElement("div");
+        splash.id = "__genial_splash__";
+        splash.style.cssText = [
+            "position:fixed",
+            "top:0",
+            "left:0",
+            "width:100vw",
+            "height:100vh",
+            "background:#0a0a0a",
+            "display:flex",
+            "flex-direction:column",
+            "justify-content:center",
+            "align-items:center",
+            "z-index:99999",
+            "transition:opacity 0.4s ease-out",
+        ].join(";");
+        splash.innerHTML = [
+            '<img src="/public/favicon.png" alt="Genial" ',
+            'style="width:96px;height:96px;object-fit:contain" />',
+            '<div style="margin-top:20px;color:#888;font-family:system-ui,sans-serif;',
+            'font-size:14px;letter-spacing:0.5px">Chargement…</div>',
+        ].join("");
 
-        // C. Reveal stratégie : après ``load`` complet + 350 ms (laisse
-        //    Chainlit React monter et faire son premier render stable).
-        //    Fallback : 2 s max au cas où ``load`` ne fire jamais.
-        const reveal = function () {
-            if (document.body && !document.body.classList.contains("genial-revealed")) {
-                document.body.classList.add("genial-revealed");
+        // Inject le splash dès que body est dispo. Si pas encore parsé
+        // (script en defer mais body pas encore là), on attend
+        // DOMContentLoaded. Sinon on append direct.
+        const injectSplash = function () {
+            if (document.body && !document.getElementById("__genial_splash__")) {
+                document.body.appendChild(splash);
             }
         };
+        if (document.body) {
+            injectSplash();
+        } else {
+            document.addEventListener("DOMContentLoaded", injectSplash);
+        }
+
+        // Hide le splash après ``window.load`` + 1200 ms (laisse
+        // largement le temps à Chainlit de faire ses re-renders en
+        // navigation privée). Fade-out 0.4 s puis remove.
+        // Fallback safety net : 5 s max.
+        const removeSplash = function () {
+            const el = document.getElementById("__genial_splash__");
+            if (!el) return;
+            el.style.opacity = "0";
+            setTimeout(function () {
+                if (el.parentNode) el.parentNode.removeChild(el);
+            }, 400);
+        };
         window.addEventListener("load", function () {
-            setTimeout(reveal, 350);
+            setTimeout(removeSplash, 1200);
         });
-        setTimeout(reveal, 2000); // Fallback safety net
+        setTimeout(removeSplash, 5000); // Fallback safety net
     } catch (e) {
         // No-op si DOM inaccessible (sandbox iframe extrême).
     }
