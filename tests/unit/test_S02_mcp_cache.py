@@ -186,3 +186,107 @@ async def test_cache_clear_empties_store() -> None:
     await c.set("t", {"x": 1}, {"v": 1})
     c.clear()
     assert await c.get("t", {"x": 1}) is None
+
+
+# ── Persistance disque (S09.5 post-fix, 2026-04-25) ──────────────────
+
+
+async def test_cache_persist_round_trip(tmp_path) -> None:
+    """Une entrée écrite par un cache persistent est rechargée par un
+    second cache pointant sur le même fichier — survit au redémarrage
+    process simulé."""
+    persist = tmp_path / "cache.json"
+    c1 = ToolCache(ttl_s=60, persist_path=persist)
+    await c1.set("get_company", {"siren": "775670417"}, {"name": "LVMH"})
+    assert persist.exists(), "le fichier de persistance doit être créé"
+
+    # Nouveau cache (simule redémarrage process)
+    c2 = ToolCache(ttl_s=60, persist_path=persist)
+    res = await c2.get("get_company", {"siren": "775670417"})
+    assert res == {"name": "LVMH"}
+
+
+async def test_cache_persist_drops_expired_on_load(tmp_path) -> None:
+    """Une entrée expirée dans le fichier disque n'est pas rechargée."""
+    persist = tmp_path / "cache.json"
+    # TTL 0 → l'entrée expire immédiatement (pas en pratique mais ok pour
+    # forcer le scénario en test).
+    c1 = ToolCache(ttl_s=0, persist_path=persist)
+    await c1.set("t", {"x": 1}, {"v": 1})
+    await asyncio.sleep(0.01)
+    # Reload : l'entrée doit être ignorée (expirée).
+    c2 = ToolCache(ttl_s=60, persist_path=persist)
+    assert await c2.get("t", {"x": 1}) is None
+
+
+async def test_cache_persist_tolerates_missing_file(tmp_path) -> None:
+    """Si ``persist_path`` n'existe pas au boot, on démarre simplement
+    avec un cache vide — pas d'exception."""
+    persist = tmp_path / "absent.json"
+    assert not persist.exists()
+    c = ToolCache(ttl_s=60, persist_path=persist)
+    # Le cache est utilisable normalement
+    await c.set("t", {"x": 1}, {"v": 1})
+    assert await c.get("t", {"x": 1}) == {"v": 1}
+    # Et on a bien créé le fichier au premier set()
+    assert persist.exists()
+
+
+async def test_cache_persist_tolerates_corrupt_file(tmp_path) -> None:
+    """Un fichier corrompu (non-JSON) ne fait pas planter le boot — on
+    démarre vide et la prochaine écriture restaure un fichier valide."""
+    persist = tmp_path / "corrupt.json"
+    persist.write_text("{not really json", encoding="utf-8")
+    c = ToolCache(ttl_s=60, persist_path=persist)
+    await c.set("t", {"x": 1}, {"v": 1})
+    assert await c.get("t", {"x": 1}) == {"v": 1}
+
+
+async def test_cache_persist_atomic_write(tmp_path) -> None:
+    """Pas de fichier .tmp orphelin après un set() réussi."""
+    persist = tmp_path / "cache.json"
+    c = ToolCache(ttl_s=60, persist_path=persist)
+    await c.set("t", {"x": 1}, {"v": 1})
+    leftovers = list(tmp_path.glob("*.tmp"))
+    assert leftovers == [], f"tmp file not cleaned up: {leftovers}"
+
+
+async def test_cache_persist_skips_invalid_entries_on_load(tmp_path) -> None:
+    """Une entrée mal formée dans le fichier disque est skippée
+    silencieusement, sans planter le chargement des autres entrées."""
+    import json as _json
+    import time as _time
+
+    persist = tmp_path / "cache.json"
+    persist.write_text(
+        _json.dumps(
+            {
+                "valid:abcd": {
+                    "value": {"v": "ok"},
+                    "expires_at": _time.time() + 3600,
+                },
+                "invalid:nope": "not a dict at all",
+                "missing_keys:xyz": {"value": {"v": "missing_exp"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    c = ToolCache(ttl_s=60, persist_path=persist)
+    # Seule l'entrée valide a été chargée.
+    assert len(c._store) == 1
+
+
+async def test_cache_no_persist_path_means_in_memory_only() -> None:
+    """Rétrocompat S02 : sans ``persist_path``, le cache reste in-memory
+    pur (aucune écriture disque)."""
+    c = ToolCache(ttl_s=60)  # pas de persist_path
+    await c.set("t", {"x": 1}, {"v": 1})
+    # Pas d'erreur, le set() ne tente pas d'écrire (c._persist_path est None)
+    assert c._persist_path is None
+
+
+def test_default_ttl_is_seven_days() -> None:
+    """TTL par défaut bumpé de 24h à 7j (review S09.5 post-fix)."""
+    from genial_agent.mcp_cache import DEFAULT_TTL_S
+
+    assert DEFAULT_TTL_S == 7 * 24 * 3600

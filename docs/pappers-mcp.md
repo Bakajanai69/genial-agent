@@ -98,6 +98,105 @@ Pappers fonctionne par **crédits**, pas par abonnement API classique.
 - Ajouter un **garde-fou applicatif** : max N appels Pappers par conversation
   utilisateur (ex : N=10), au-delà on force une synthèse.
 
+### 4.1 Coût par tool (probe live 2026-04-25)
+
+| Tool MCP | Coût observé (crédits/appel) |
+|---|---:|
+| `sirenisateur` | 1 |
+| `recherche-entreprises` | 1 |
+| `comptes-entreprise` | 2 |
+| `cartographie-entreprise` | 3 |
+| `recherche-dirigeants` | 1 à 4 (selon `par_page`) |
+| `conformite-personne-physique` | 0 (gratuit côté observation) |
+| `recherche-beneficiaires` | nécessite **habilitation séparée** (hors scope) |
+
+Implication : un tour U3 typique (2 `sirenisateur` + 2
+`comptes-entreprise`) coûte **6 crédits**, pas 4. Bien dimensionner les
+caps applicatifs à partir de cette base.
+
+### 4.2 Anomalie de routage PAYG ↔ abonnement (2026-04-25)
+
+La doc Pappers indique que les jetons Pay-As-You-Go **doivent prendre
+le relais** quand le pack abonnement est saturé :
+
+> *"Pay as You Go credits can take over in case the subscription
+> credits are entirely consumed to ensure continuity of your services."*
+
+**Probe live 2026-04-25** (cf.
+[`scripts/probe_payg_compatibility.py`](../scripts/probe_payg_compatibility.py))
+sur les 7 tools retenus, abonnement à 0/500, PAYG = 94 :
+
+| Tool | PAYG accepté ? | Comportement |
+|---|---|---|
+| `sirenisateur` | ✅ | débit normal sur PAYG |
+| `recherche-entreprises` | ✅ | débit normal sur PAYG |
+| `cartographie-entreprise` | ✅ | débit normal sur PAYG |
+| **`comptes-entreprise`** | ❌ | **refuse l'appel** ("crédits insuffisants") sans débiter PAYG |
+| `recherche-dirigeants` | ✅ | débit normal sur PAYG |
+| `conformite-personne-physique` | ✅ | débit normal sur PAYG |
+| `recherche-beneficiaires` | n/a | bloqué par habilitation indépendamment des crédits |
+| **`informations-entreprise`** (exclu) | ❌ | **même comportement** que `comptes-entreprise` (probe 2026-04-25) |
+
+→ **2 tools côté Entreprise présentent l'anomalie** :
+``comptes-entreprise`` et ``informations-entreprise``. Hypothèse :
+ces tools "lourds" côté Pappers ont leur propre routage qui ne consulte
+pas les jetons PAYG (soit bug, soit politique Premium implicite). Tous
+les autres tools acceptent les PAYG comme prévu par la doc. À signaler
+au support
+([[email protected]](mailto:[email protected]))
+pour fix serveur. En attendant : voir §4.3.
+
+### 4.2.1 Workaround applicatif : `recherche-entreprises` à la place de `comptes-entreprise`
+
+Probe live 2026-04-25 (cf.
+[`scripts/probe_comptes_entreprise_alternatives.py`](../scripts/probe_comptes_entreprise_alternatives.py))
+sur 3 entités : `recherche-entreprises` avec
+`return_fields=["chiffre_affaires", "resultat", "capital", "effectif",
+"annee_finances", "annee_effectif"]` et `siren` ciblé retourne les
+chiffres financiers **headline** de l'entité.
+
+| Entité | CA (€) | Résultat (€) | Année |
+|---|---:|---:|---:|
+| LVMH (SIREN 775670417) | 651 000 000 | +9 587 500 000 | 2024 |
+| Carrefour Hyper (451321335) | 11 770 276 417 | −408 055 834 | 2024 |
+| Casino Guichard (554501171) | 98 000 000 | −2 231 000 000 | 2024 |
+
+**Couverture** : CA + résultat + capital + effectif + année courante,
+**accepté en PAYG** (1 crédit/appel). Suffit à répondre aux questions
+"quel est le CA actuel" / "résultat net 202X" sans appeler
+`comptes-entreprise` (PAYG-KO).
+
+**Limites** :
+
+- Pas d'historique multi-années dans un seul appel — pour comparer
+  N années (U3 cahier), il faut `comptes-entreprise` (jetons abo
+  uniquement) ou pré-warmer le cache disque (cf. §4.3).
+- Pas de bilans détaillés (liasses fiscales) — juste les "headline".
+- Retourne les **comptes sociaux de l'entité juridique précise**, pas
+  les comptes consolidés du groupe (LVMH SA = 651 M€ vs LVMH groupe
+  consolidé ~84 Md€). À utiliser sur le SIREN ciblé approprié.
+
+### 4.3 Workaround : cache disque persistant (S09.5 post-fix)
+
+Pour blinder une démo qui dépend de `comptes-entreprise` malgré le bug
+de routage PAYG :
+
+1. **Cache MCP persistant** sur disque ([`mcp_cache.py`](../src/genial_agent/mcp_cache.py)) :
+   activable via la variable d'env `MCP_CACHE_PERSIST_PATH`
+   (e.g. `data/mcp_cache.json`). TTL bumpé 24 h → 7 jours pour
+   absorber les fenêtres de blocage.
+2. **Pre-warm** ([`scripts/prewarm_persistent_cache.py`](../scripts/prewarm_persistent_cache.py)) :
+   lit les traces existantes pour extraire les `(tool, args)` connus,
+   ré-exécute les appels PAYG-compatibles → cache disque rempli.
+   Skipper automatiquement les appels `comptes-entreprise` (PAYG-KO).
+3. **Pre-warm `comptes-entreprise`** : à relancer le 30/04 au refill
+   abonnement Pappers (les jetons abo couvrent ce tool, eux). Une fois
+   en cache disque, le tool sert depuis le cache pendant 7 jours, sans
+   ré-appel live.
+4. **Mode dégradé** ([`credit_guard.degraded()`](../src/genial_agent/observability/credit_guard.py))
+   peut être basculé manuellement avant la démo si on veut forcer le
+   cache-only et éviter tout appel live.
+
 ---
 
 ## 5. Déclenchement : mention explicite "via Pappers"

@@ -1,4 +1,4 @@
-"""Cache tool-level MCP Pappers : (tool_name, args_hash) → result, TTL 24 h.
+"""Cache tool-level MCP Pappers : (tool_name, args_hash) → result, TTL bumpé 7 j.
 
 Couvre trois besoins :
 
@@ -19,6 +19,33 @@ Contraintes :
 - **Sérialisation ``args``** : ``json.dumps(default=str)`` pour tolérer
   les objets arbitraires passés par l'agent (datetime, Decimal, Enum…)
   sans crasher la clé.
+
+**Persistance disque optionnelle (review S09.5 post-fix, 2026-04-25)** :
+
+- Le constructeur accepte ``persist_path`` : si défini, le cache charge
+  au boot un JSON de la forme ``{key: {value, expires_at_epoch}}`` et
+  écrit à chaque ``set()`` (write-through). Survit aux redémarrages
+  Railway et au cold start. Désactivé par défaut (rétrocompatibilité S02).
+- Le timestamp d'expiration bascule de ``time.monotonic()`` (in-RAM)
+  vers ``time.time()`` epoch pour permettre le round-trip disque. Drift
+  NTP marginal sur un TTL 7 jours.
+- TTL bumpé 24 h → 7 jours pour absorber les fenêtres de blocage côté
+  serveur Pappers (e.g. bug PAYG sur ``comptes-entreprise`` constaté le
+  2026-04-25 — détail dans ``docs/pappers-mcp.md`` §4).
+
+Cas d'usage du cache disque :
+
+1. Pre-warm post-refill abonnement (le 30/04) qui produit un fichier
+   ``data/mcp_cache.json`` à reload au boot.
+2. Mode dégradé robuste : si l'abonnement est saturé et qu'un tool
+   refuse les PAYG (bug), le cache local prend le relais 7 jours sans
+   intervention.
+
+Usage::
+
+    cache = ToolCache(persist_path=Path("data/mcp_cache.json"))
+    # ou rétrocompatible (in-memory only):
+    cache = ToolCache()
 """
 
 from __future__ import annotations
@@ -29,19 +56,26 @@ import json
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import structlog
 
 logger = structlog.get_logger(__name__)
 
-DEFAULT_TTL_S = 24 * 3600  # 24 h, cahier §5.4
+# TTL bumpé 24h → 7j (review S09.5 post-fix, 2026-04-25).
+# Rationale : couvre la fenêtre où le pack mensuel Pappers est saturé
+# (recharge mensuelle, jusqu'à 30 jours sans refill), ainsi que les bugs
+# Pappers de routage PAYG (cf. docs/pappers-mcp.md §4).
+DEFAULT_TTL_S = 7 * 24 * 3600  # 7 jours
 DEFAULT_MAX_SIZE = 1024  # cf. review S02 C5
 
 
 @dataclass
 class _Entry:
     value: dict[str, Any]
+    # Epoch UNIX (``time.time()``) — switch depuis ``time.monotonic()``
+    # pour rendre le cache persistable sur disque entre redémarrages.
     expires_at: float
 
 
@@ -53,7 +87,12 @@ class ToolCache:
     bloquerait toutes les autres.
     """
 
-    def __init__(self, ttl_s: int = DEFAULT_TTL_S, max_size: int = DEFAULT_MAX_SIZE) -> None:
+    def __init__(
+        self,
+        ttl_s: int = DEFAULT_TTL_S,
+        max_size: int = DEFAULT_MAX_SIZE,
+        persist_path: Path | None = None,
+    ) -> None:
         if max_size < 1:
             raise ValueError("max_size must be >= 1")
         self._ttl = ttl_s
@@ -61,6 +100,67 @@ class ToolCache:
         self._store: OrderedDict[str, _Entry] = OrderedDict()
         self._inflight: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._lock = asyncio.Lock()
+        # Persistance disque (review S09.5 post-fix). None = comportement
+        # historique in-memory only (rétrocompatibilité S02).
+        self._persist_path = persist_path
+        if self._persist_path is not None:
+            self._load_from_disk()
+
+    def _load_from_disk(self) -> None:
+        """Charge les entrées non-expirées depuis ``persist_path``.
+
+        Best-effort : si le fichier est absent, illisible ou contient
+        une entrée corrompue, on log et on continue avec un cache vide.
+        Une entrée dont ``expires_at`` est passé est silencieusement
+        ignorée (pas réécrite — sera purgée au prochain ``_persist``).
+        """
+        assert self._persist_path is not None
+        if not self._persist_path.exists():
+            logger.info("mcp_cache_load_skip", reason="file_absent")
+            return
+        try:
+            data = json.loads(self._persist_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            logger.warning("mcp_cache_load_failed", error=type(exc).__name__)
+            return
+        now = time.time()
+        loaded = 0
+        skipped = 0
+        for k, entry in data.items():
+            try:
+                exp = float(entry["expires_at"])
+                if exp <= now:
+                    skipped += 1
+                    continue
+                self._store[k] = _Entry(value=entry["value"], expires_at=exp)
+                loaded += 1
+            except (KeyError, TypeError, ValueError):
+                skipped += 1
+                continue
+        logger.info("mcp_cache_loaded", loaded=loaded, skipped_or_expired=skipped)
+
+    def _persist_to_disk(self) -> None:
+        """Réécrit l'intégralité du cache sur disque (write-through).
+
+        Best-effort : un échec d'écriture (disque plein, perms) est
+        loggé mais ne propage pas — le cache RAM reste cohérent.
+        """
+        assert self._persist_path is not None
+        snapshot = {
+            k: {"value": e.value, "expires_at": e.expires_at} for k, e in self._store.items()
+        }
+        try:
+            self._persist_path.parent.mkdir(parents=True, exist_ok=True)
+            # Écriture atomique : tmp puis rename (POSIX). Évite un
+            # cache corrompu si on crashe au milieu de l'écriture.
+            tmp = self._persist_path.with_suffix(self._persist_path.suffix + ".tmp")
+            tmp.write_text(
+                json.dumps(snapshot, ensure_ascii=False, default=str),
+                encoding="utf-8",
+            )
+            tmp.replace(self._persist_path)
+        except OSError as exc:
+            logger.warning("mcp_cache_persist_failed", error=type(exc).__name__)
 
     @staticmethod
     def key(tool_name: str, args: dict[str, Any]) -> str:
@@ -81,8 +181,13 @@ class ToolCache:
             entry = self._store.get(k)
             if entry is None:
                 return None
-            if entry.expires_at < time.monotonic():
+            # ``time.time()`` epoch (review S09.5 post-fix) pour rendre
+            # le cache persistable sur disque.
+            if entry.expires_at < time.time():
                 del self._store[k]
+                # Un GET ne déclenche PAS de persist : ça génèrerait des
+                # writes parasites et la prochaine écriture (set ou clear)
+                # nettoiera de toute façon.
                 return None
             # LRU : entrée fraîche → move to end.
             self._store.move_to_end(k)
@@ -92,13 +197,17 @@ class ToolCache:
     async def set(self, tool_name: str, args: dict[str, Any], value: dict[str, Any]) -> None:
         k = self.key(tool_name, args)
         async with self._lock:
-            self._store[k] = _Entry(value=value, expires_at=time.monotonic() + self._ttl)
+            self._store[k] = _Entry(value=value, expires_at=time.time() + self._ttl)
             self._store.move_to_end(k)
             # Éviction LRU si on dépasse la borne (fait dans la boucle
             # pour absorber les inserts multiples lors d'un warmup).
             while len(self._store) > self._max_size:
                 evicted_key, _ = self._store.popitem(last=False)
                 logger.info("mcp_cache_evict", key=evicted_key)
+            # Write-through disque (si activé). Sous le lock pour
+            # garantir la cohérence avec _store.
+            if self._persist_path is not None:
+                self._persist_to_disk()
 
     async def contains(self, tool_name: str, args: dict[str, Any]) -> bool:
         return (await self.get(tool_name, args)) is not None
@@ -151,7 +260,14 @@ class ToolCache:
                 self._inflight.pop(k, None)
 
     def clear(self) -> None:
-        """Vide le cache et les futures en vol. Utile pour les tests."""
+        """Vide le cache et les futures en vol. Utile pour les tests.
+
+        Si la persistance disque est active, on **ne** purge pas le
+        fichier disque (c'est intentionnel : ``clear()`` est appelé par
+        les fixtures pytest et ne doit pas écraser un cache prod). Pour
+        purger le disque, supprimer le fichier ``persist_path``
+        manuellement.
+        """
         self._store.clear()
         # Annuler les inflight (si jamais un test leak).
         for fut in self._inflight.values():
@@ -160,4 +276,13 @@ class ToolCache:
         self._inflight.clear()
 
 
-cache = ToolCache()
+# Instance par défaut : in-memory only (rétrocompatible S02). La
+# persistance disque s'active explicitement via la variable d'env
+# ``MCP_CACHE_PERSIST_PATH`` (relatif au CWD ou absolu) — utile pour
+# Railway (volume persistant) ou un dev qui veut garder son cache au
+# redémarrage. Quand non définie, comportement historique inchangé.
+import os as _os  # noqa: E402
+
+_persist_env = _os.getenv("MCP_CACHE_PERSIST_PATH")
+_persist_path: Path | None = Path(_persist_env) if _persist_env else None
+cache = ToolCache(persist_path=_persist_path)

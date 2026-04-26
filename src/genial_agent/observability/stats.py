@@ -40,6 +40,15 @@ class Stats:
     anthropic_input_tokens: int = 0
     anthropic_output_tokens: int = 0
     errors: int = 0
+    # S09.5 — instrumentation Payload Vault. ``payloads_offloaded_total``
+    # = nombre de tool results MCP rangés dans le vault parce que >
+    # ``OFFLOAD_THRESHOLD_CHARS``. ``payload_inspects_total`` /
+    # ``payload_searches_total`` = nombre de lookups de l'agent dans
+    # le vault. Le ratio inspects/offloaded donne un signal qualité :
+    # ~1-3 inspects/offload = bon usage, > 5 = l'agent peine.
+    payloads_offloaded_total: int = 0
+    payload_inspects_total: int = 0
+    payload_searches_total: int = 0
 
 
 _stats = Stats()
@@ -54,6 +63,9 @@ _INCR_FIELDS = frozenset(
         "anthropic_input_tokens",
         "anthropic_output_tokens",
         "errors",
+        "payloads_offloaded_total",
+        "payload_inspects_total",
+        "payload_searches_total",
     }
 )
 
@@ -94,6 +106,9 @@ def snapshot() -> dict[str, int | str]:
         "anthropic_input_tokens": _stats.anthropic_input_tokens,
         "anthropic_output_tokens": _stats.anthropic_output_tokens,
         "errors": _stats.errors,
+        "payloads_offloaded_total": _stats.payloads_offloaded_total,
+        "payload_inspects_total": _stats.payload_inspects_total,
+        "payload_searches_total": _stats.payload_searches_total,
     }
 
 

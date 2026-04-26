@@ -104,9 +104,10 @@ mcp.pappers.fr/{API_KEY}
 
 - **6 couches** garde-fous : input gate (regex anti-injection 2026 sur
   texte normalisé NFKD), system prompt durci, Claude safety native,
-  execution caps (7 tool calls / 60 s wall-clock / 80 K tokens-per-
-  session), output validator déterministe (Luhn SIREN + bilan
-  horodaté + advisory reframing), Haiku-critic async non-bloquant.
+  execution caps (7 tool calls Pappers / 5 lookups locaux Payload Vault
+  / 60 s wall-clock / 80 K tokens-per-session), output validator
+  déterministe (Luhn SIREN + bilan horodaté + advisory reframing),
+  Haiku-critic async non-bloquant.
 - **Pack adversarial 10 prompts** exécutés automatiquement,
   rapport : [`docs/adversarial-run.md`](docs/adversarial-run.md)
   (généré par `tests/integration/test_S09_adversarial.py`).
@@ -124,16 +125,17 @@ mcp.pappers.fr/{API_KEY}
    review S08 §B1bis. Aussi : retire `T9_lang_chinese` du set
    `TOLERATED` du runner adversarial (cf.
    `tests/integration/test_S09_adversarial.py`).
-2. **Slicing intelligent `comptes-entreprise`** — au lieu de
-   la borne aveugle 16 K chars (`agent.py:_TOOL_RESULT_MAX_CHARS`)
-   qui coupe les bilans Pappers très volumineux (706 K chars sur
-   Carrefour Hypermarchés sans `annee`), extraire les sections
-   clés (CA, résultat net, total actif, effectif moyen) sur la
-   dernière année + 2 précédentes. Découverte du dogfooding S09
-   inspection MCP, cf.
-   [`docs/inspection-mcp-vs-agent.md`](docs/inspection-mcp-vs-agent.md).
-   Story dédiée [`S09.5`](docs/stories/S09.5-mcp-payload-handling.md).
-   Effort ~2 h.
+2. ~~**Slicing intelligent `comptes-entreprise`**~~ — **livré dans
+   S09.5** ([`payload_vault.py`](src/genial_agent/payload_vault.py) +
+   tools locaux `payload_inspect` / `payload_search`). Offload
+   générique session-scoped : tout payload MCP > 12 K chars est
+   rangé dans un vault in-memory, l'agent reçoit un index JSON
+   compact et ré-interroge à la demande. Sur Carrefour
+   Hypermarchés (706 K chars), l'agent récupère désormais le CA
+   2024 verbatim au lieu de tronquer à 2016. Cf. story
+   [`S09.5`](docs/stories/S09.5-mcp-payload-handling.md) et tableau
+   avant/après [`docs/inspection-mcp-vs-agent.md`](docs/inspection-mcp-vs-agent.md)
+   §"Après S09.5".
 3. **Bascule Bedrock EU** (Paris) ou **Vertex AI EU** (Frankfurt)
    pour résidence RGPD — `anthropic[bedrock]`, ~20 lignes.
 4. **Tracing distribué Langfuse / OpenTelemetry** — 1 trace par

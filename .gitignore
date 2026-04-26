@@ -47,3 +47,18 @@ chainlit.md.bak
 # Local dumps
 *.log
 *.local
+
+# S09.5 — traces JSONL (events bruts pour debug). Le journal Markdown
+# ``traces/S095_iterations.md`` est, lui, **commité** comme preuve
+# d'observation réelle (cf. story §"Boucle de validation observée").
+traces/*.jsonl
+# Idem pour la matrice JSON du probe PAYG (review S09.5 post-fix) : le
+# résumé est dans le journal et docs/pappers-mcp.md, le JSON détaillé
+# reste local.
+traces/*.json
+
+# S09.5 post-fix — cache MCP persistent sur disque. Contient des
+# payloads Pappers parfois lourds (centaines de Ko) — JAMAIS commité.
+# Cf. ``src/genial_agent/mcp_cache.py`` + variable d'env
+# ``MCP_CACHE_PERSIST_PATH`` qui pointe par convention sur ``data/``.
+data/

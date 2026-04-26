@@ -65,7 +65,7 @@ from anthropic import (
 )
 from anthropic.types import MessageParam, ToolUseBlock
 
-from genial_agent import mcp_pappers
+from genial_agent import mcp_pappers, payload_vault
 from genial_agent.config import settings
 from genial_agent.mcp_pappers import PappersError
 from genial_agent.models import (
@@ -75,6 +75,11 @@ from genial_agent.models import (
     MAX_ITERATIONS,
     ModelTier,
     model_id,
+)
+from genial_agent.payload_vault import (
+    LOOKUP_MAX_CHARS_DEFAULT,
+    OFFLOAD_THRESHOLD_CHARS,
+    PayloadVault,
 )
 from genial_agent.prompts import SYSTEM_PROMPT_AGENT
 
@@ -105,6 +110,18 @@ class ConversationState:
 
     messages: list[MessageParam] = field(default_factory=list)
     tool_calls_count: int = 0
+    # Compteur séparé pour les tools locaux du Payload Vault (S09.5).
+    # Sépare les vrais tool calls Pappers (qui consomment crédits +
+    # latence réseau) des lookups in-memory (gratuits côté coût mais
+    # capés pour borner le coût LLM des prompts pathologiques). Cf.
+    # ``MAX_LOCAL_LOOKUPS_PER_TURN`` dans ``guardrails/caps.py``.
+    local_lookup_count: int = 0
+    # Vault session-scoped pour les tool results MCP volumineux (S09.5).
+    # Stocke les payloads bruts > ``OFFLOAD_THRESHOLD_CHARS`` ; l'agent
+    # reçoit un index compact + un ``payload_id`` et ré-interroge via
+    # ``payload_inspect`` / ``payload_search``. Vit le temps de la
+    # session Chainlit (jamais sur disque, jamais cross-session).
+    payload_vault: PayloadVault = field(default_factory=PayloadVault)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False, compare=False)
 
 
@@ -150,6 +167,148 @@ def _neutralize_injection_attempts(s: str) -> str:
     for src, dst in _TAG_SCRUB.items():
         s = s.replace(src, dst)
     return s
+
+
+# --- Tools locaux Payload Vault (S09.5) ------------------------------------
+
+PAYLOAD_INSPECT_TOOL_NAME = "payload_inspect"
+PAYLOAD_SEARCH_TOOL_NAME = "payload_search"
+LOCAL_PAYLOAD_TOOL_NAMES = frozenset({PAYLOAD_INSPECT_TOOL_NAME, PAYLOAD_SEARCH_TOOL_NAME})
+
+# Exposés à Claude en plus des tools Pappers via ``extra_tools``-like
+# concatenation dans ``run_turn``. Ces tools sont **dispatchés
+# localement** (cf. dispatch ci-dessous) — ils ne touchent jamais
+# ``mcp_pappers.call_tool`` et ne consomment pas de crédit Pappers.
+LOCAL_PAYLOAD_TOOLS: list[dict[str, Any]] = [
+    {
+        "name": PAYLOAD_INSPECT_TOOL_NAME,
+        "description": (
+            "Read a verbatim subtree from a previously offloaded MCP payload. "
+            "Use the payload_id returned in the previous tool_result's `_payload_id` field, "
+            "and a JSON path resolved against the index `_skeleton` / `_array_sizes`. "
+            "Path syntax: dotted with optional `$` prefix and `[i]` indices, "
+            "e.g. '$.items[0].field' or 'items[-1].field'. A numeric segment is "
+            "interpreted as a string-key when the current node is a dict "
+            "(handy for date-keyed payloads like '$.2023[0]') and as an "
+            "integer index when it is a list. Negative indices count from "
+            "the end (-1 = last). Returns the JSON-encoded literal value "
+            "(verbatim, never a summary)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "payload_id": {
+                    "type": "string",
+                    "description": "The _payload_id field from the index returned by an offloaded tool result.",
+                },
+                "json_path": {
+                    "type": "string",
+                    "description": "Dotted/bracketed path, e.g. '$.foo.bar[0]' or 'foo[-1]'.",
+                },
+                "max_chars": {
+                    "type": "integer",
+                    "description": "Cap on the returned JSON length. Default 8000, hard max 12000.",
+                    "default": LOOKUP_MAX_CHARS_DEFAULT,
+                    "maximum": 12_000,
+                },
+            },
+            "required": ["payload_id", "json_path"],
+        },
+    },
+    {
+        "name": PAYLOAD_SEARCH_TOOL_NAME,
+        "description": (
+            "Regex search inside a previously offloaded MCP payload. Useful when "
+            "you don't know the exact path (e.g. find an identifier, a year, "
+            "a name in unknown structure). Returns up to max_matches occurrences "
+            "with surrounding context. Pattern is case-insensitive and multiline. "
+            "Does not consume any Pappers credit."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "payload_id": {
+                    "type": "string",
+                    "description": "The _payload_id field from the index returned by an offloaded tool result.",
+                },
+                "pattern": {
+                    "type": "string",
+                    "description": "Python regex (case-insensitive, multiline).",
+                },
+                "max_matches": {
+                    "type": "integer",
+                    "description": "Cap on the number of matches returned. Default 10, hard max 30.",
+                    "default": 10,
+                    "maximum": 30,
+                },
+            },
+            "required": ["payload_id", "pattern"],
+        },
+    },
+]
+
+
+def _dispatch_local_payload_tool(
+    state: ConversationState,
+    name: str,
+    tool_input: dict[str, Any],
+) -> tuple[str, bool, dict[str, Any] | None]:
+    """Exécute un tool local Payload Vault. Retourne ``(content_str,
+    is_error, observability_event)``.
+
+    L'event d'observabilité (``payload_inspected`` ou ``payload_searched``)
+    est rendu sous forme de dict prêt à être ``yield``é par ``run_turn``.
+    Si ``payload_id`` est inconnu, l'event vaut None et le content est
+    un message d'erreur explicite que Claude peut interpréter.
+    """
+    pid = tool_input.get("payload_id")
+    if not isinstance(pid, str):
+        return ("Error: missing or invalid 'payload_id'", True, None)
+    raw = state.payload_vault.get(pid)
+    if raw is None:
+        return (
+            f"Error: payload_id '{pid}' unknown or expired (vault is session-scoped)",
+            True,
+            None,
+        )
+
+    if name == PAYLOAD_INSPECT_TOOL_NAME:
+        json_path = tool_input.get("json_path", "")
+        max_chars = tool_input.get("max_chars", LOOKUP_MAX_CHARS_DEFAULT)
+        try:
+            max_chars_int = int(max_chars)
+        except (TypeError, ValueError):
+            max_chars_int = LOOKUP_MAX_CHARS_DEFAULT
+        content = payload_vault.inspect(raw, str(json_path), max_chars_int)
+        # Scrub par défense en profondeur : la valeur extraite vient
+        # d'un payload Pappers, donc soumise au même risque de prompt
+        # injection indirecte qu'un tool_result direct.
+        scrubbed = _neutralize_injection_attempts(content)
+        event = {
+            "type": "payload_inspected",
+            "payload_id": pid,
+            "json_path": str(json_path),
+            "returned_chars": len(scrubbed),
+        }
+        return (scrubbed, False, event)
+
+    # PAYLOAD_SEARCH_TOOL_NAME
+    pattern = tool_input.get("pattern", "")
+    max_matches = tool_input.get("max_matches", 10)
+    try:
+        max_matches_int = int(max_matches)
+    except (TypeError, ValueError):
+        max_matches_int = 10
+    matches = payload_vault.search(raw, str(pattern), max_matches_int)
+    serialized = json.dumps(matches, ensure_ascii=False, indent=2)
+    scrubbed = _neutralize_injection_attempts(serialized)
+    event = {
+        "type": "payload_searched",
+        "payload_id": pid,
+        "pattern": str(pattern)[:200],
+        "match_count": sum(1 for m in matches if "error" not in m),
+    }
+    return (scrubbed, False, event)
 
 
 async def run_turn(
@@ -203,6 +362,11 @@ async def run_turn(
         # du schéma converter : règle README "Décisions de cohérence".
         pappers_tools = await mcp_pappers.list_available_tools()
         tools_schema = mcp_pappers.to_anthropic_schema(pappers_tools)
+        # Tools locaux Payload Vault (S09.5) — toujours exposés. Ils
+        # sont dispatchés localement dans la boucle ci-dessous (jamais
+        # via mcp_pappers.call_tool) et n'incrémentent que
+        # ``state.local_lookup_count`` (cap séparé S05).
+        tools_schema = tools_schema + LOCAL_PAYLOAD_TOOLS
         if extra_tools:
             tools_schema = tools_schema + extra_tools
 
@@ -322,37 +486,93 @@ async def run_turn(
                 for block in final.content:
                     if not isinstance(block, ToolUseBlock):
                         continue
-                    state.tool_calls_count += 1
+
+                    is_local_payload = block.name in LOCAL_PAYLOAD_TOOL_NAMES
+                    if is_local_payload:
+                        # Local dispatch : ne consomme **pas** de crédit
+                        # Pappers, ne compte pas dans
+                        # ``state.tool_calls_count`` (cap S05). Compteur
+                        # séparé ``local_lookup_count`` (cap
+                        # ``MAX_LOCAL_LOOKUPS_PER_TURN`` côté routing).
+                        state.local_lookup_count += 1
+                    else:
+                        state.tool_calls_count += 1
+
                     yield {
                         "type": "tool_use",
                         "id": block.id,
                         "name": block.name,
                         "input": block.input,
                     }
-                    try:
-                        result = await mcp_pappers.call_tool(block.name, block.input)
-                        raw_str = _stringify_tool_result(result)
-                        # Scrub des séquences de frontière de contexte
-                        # (indirect prompt injection via contenu Pappers).
-                        content_str = _neutralize_injection_attempts(raw_str)
-                        is_error = False
-                    except PappersError as exc:
-                        logger.info(
-                            "agent_pappers_business_error",
-                            tool_name=block.name,
-                            error_type=type(exc).__name__,
+
+                    if is_local_payload:
+                        # Dispatch local — jamais d'appel mcp_pappers.
+                        content_str, is_error, obs_event = _dispatch_local_payload_tool(
+                            state, block.name, dict(block.input)
                         )
-                        content_str = f"Erreur Pappers : {exc}"
-                        is_error = True
-                    except Exception as exc:  # noqa: BLE001 — informer Claude, pas remonter
-                        logger.warning(
-                            "agent_tool_call_failed",
-                            tool_name=block.name,
-                            error_type=type(exc).__name__,
-                            exc_info=True,
-                        )
-                        content_str = f"Erreur technique : {type(exc).__name__}"
-                        is_error = True
+                        if obs_event is not None:
+                            yield obs_event
+                    else:
+                        try:
+                            result = await mcp_pappers.call_tool(block.name, block.input)
+                            raw_str = _extract_text_from_result(result)
+                            if len(raw_str) > OFFLOAD_THRESHOLD_CHARS:
+                                # Offload (S09.5) : le payload est rangé
+                                # dans le vault session-scoped, l'agent
+                                # reçoit un index compact + payload_id
+                                # et peut ré-interroger via
+                                # payload_inspect / payload_search.
+                                pid = state.payload_vault.store(raw_str)
+                                index = payload_vault.build_index(raw_str, pid)
+                                # Scrub des balises de frontière dans
+                                # l'index : ``_preview_head`` /
+                                # ``_preview_tail`` viennent du payload
+                                # Pappers brut, soumis au même risque
+                                # d'indirect prompt injection que les
+                                # tool_results normaux.
+                                # Pas d'``indent=2`` : ``payload_vault.build_index``
+                                # check sa taille via ``json.dumps`` sans
+                                # indent (cf. ``INDEX_BUDGET_CHARS``). On
+                                # aligne la sérialisation envoyée au LLM
+                                # sur le même format pour que le budget
+                                # soit respecté à l'octet près (review
+                                # S09.5 F1). Économie ~17 % de tokens.
+                                content_str = _neutralize_injection_attempts(
+                                    json.dumps(index, ensure_ascii=False)
+                                )
+                                yield {
+                                    "type": "payload_offloaded",
+                                    "payload_id": pid,
+                                    "tool_name": block.name,
+                                    "size_chars": len(raw_str),
+                                }
+                            else:
+                                # Petit payload : pass-through avec scrub
+                                # anti-injection. Filet de sécurité
+                                # ``_truncate_tool_result`` en cas de
+                                # payload juste sous le seuil mais
+                                # malicieusement gros.
+                                content_str = _neutralize_injection_attempts(
+                                    _truncate_tool_result(raw_str)
+                                )
+                            is_error = False
+                        except PappersError as exc:
+                            logger.info(
+                                "agent_pappers_business_error",
+                                tool_name=block.name,
+                                error_type=type(exc).__name__,
+                            )
+                            content_str = f"Erreur Pappers : {exc}"
+                            is_error = True
+                        except Exception as exc:  # noqa: BLE001 — informer Claude, pas remonter
+                            logger.warning(
+                                "agent_tool_call_failed",
+                                tool_name=block.name,
+                                error_type=type(exc).__name__,
+                                exc_info=True,
+                            )
+                            content_str = f"Erreur technique : {type(exc).__name__}"
+                            is_error = True
 
                     yield {
                         "type": "tool_result",
@@ -390,13 +610,21 @@ async def run_turn(
             }
 
 
-# Borne de sécurité sur la taille du tool_result passé à Claude. Pappers
-# peut renvoyer ~200k tokens sur une ``recherche-dirigeants`` d'un Bernard
-# Arnault — au-delà, on explose le context window Haiku (200k) avant même
-# le prochain tour. 16_000 caractères ≈ 4–5k tokens : marge confortable
-# pour enchaîner 4-5 tool calls dans une conversation multi-turn sans
-# tripper ``prompt is too long``.
-_TOOL_RESULT_MAX_CHARS = 16_000
+# Borne de sécurité sur la taille du tool_result passé à Claude.
+#
+# Depuis S09.5, **le chemin nominal pour les payloads volumineux** est
+# le Payload Vault (offload conditionnel à ``OFFLOAD_THRESHOLD_CHARS =
+# 12 000``, cf. ``payload_vault.py``). ``_truncate_tool_result`` reste
+# branché comme **filet de sécurité** sur les payloads juste sous le
+# seuil d'offload (12 K - 24 K) pour borner le worst-case si un futur
+# tool MCP ne passe pas par l'offload (par ex. parce que l'extraction
+# texte échoue ou qu'on désactive le vault).
+#
+# Borne **doublée** de 16 000 → 24 000 chars : avec l'offload qui prend
+# le relais au-dessus de 12 K, on a marge confortable et on évite de
+# couper artificiellement un payload de 13-23 K qui aurait pu passer
+# tel quel au LLM.
+_TOOL_RESULT_MAX_CHARS = 24_000
 
 # Fenêtre de recherche pour couper sur un délimiteur propre (newline,
 # virgule, espace) plutôt qu'au milieu d'un token. 512 chars = 0.2 % de la
@@ -409,7 +637,14 @@ def _truncate_tool_result(raw: str) -> str:
     """Tronque à ``_TOOL_RESULT_MAX_CHARS`` en cherchant un délimiteur
     propre (``\\n``, ``,``, espace) dans la fenêtre de fin pour éviter
     de couper un JSON au milieu d'une clé (sinon Claude peut halluciner
-    en "recomplétant" la structure — cf. review S03 A6)."""
+    en "recomplétant" la structure — cf. review S03 A6).
+
+    **Filet de sécurité S09.5** : le chemin nominal pour > 12 K passe
+    par le Payload Vault (cf. ``payload_vault.py`` + dispatch dans
+    ``run_turn``). Cette fonction ne devrait quasi jamais être hit en
+    prod — elle reste comme garantie qu'aucun payload ne dépasse jamais
+    24 K dans l'historique conversation, peu importe le bug en amont.
+    """
     if len(raw) <= _TOOL_RESULT_MAX_CHARS:
         return raw
     marker = "\n…[tronqué : réponse Pappers dépasse la borne agent]"
@@ -425,16 +660,16 @@ def _truncate_tool_result(raw: str) -> str:
     return raw[:cutoff] + marker
 
 
-def _stringify_tool_result(result: dict[str, Any]) -> str:
-    """Extrait un texte compact du ``CallToolResult`` sérialisé par S02.
+def _extract_text_from_result(result: dict[str, Any]) -> str:
+    """Extrait le texte brut du ``CallToolResult`` sérialisé par S02
+    **sans** truncation. La décision offload-ou-pass-through est prise
+    en aval (cf. ``run_turn`` S09.5).
 
     S02 retourne ``result.model_dump(mode="json")`` — dict avec
     ``content: [{"type": "text", "text": "..."}]`` en général. On sort
-    le premier bloc texte (cohérent avec ``mcp_pappers._first_text_block``)
-    ou on tombe sur un ``json.dumps`` du payload complet. Résultat
-    tronqué via ``_truncate_tool_result`` dans tous les cas.
+    le premier bloc texte ou on fallback sur ``json.dumps`` du payload
+    complet.
     """
-    raw = json.dumps(result, ensure_ascii=False)
     content = result.get("content")
     if isinstance(content, list):
         for block in content:
@@ -445,6 +680,16 @@ def _stringify_tool_result(result: dict[str, Any]) -> str:
                 continue
             text = block.get("text")
             if isinstance(text, str):
-                raw = text
-                break
-    return _truncate_tool_result(raw)
+                return text
+    return json.dumps(result, ensure_ascii=False)
+
+
+def _stringify_tool_result(result: dict[str, Any]) -> str:
+    """Compat S03 : extraction + truncation immédiate à la borne S03.
+
+    Conservé pour les call-sites historiques (tests S03) qui veulent
+    encore le combo extract + truncate. Le chemin nominal S09.5 dans
+    ``run_turn`` utilise ``_extract_text_from_result`` puis décide de
+    l'offload — il n'appelle plus cette fonction.
+    """
+    return _truncate_tool_result(_extract_text_from_result(result))

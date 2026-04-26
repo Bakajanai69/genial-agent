@@ -598,6 +598,8 @@ async def test_simple_query_routing_done_exposes_full_contract(
         "capped_reason_code",
         "capped_reason",
         "tool_calls_count",
+        # S09.5 — compteur séparé pour les lookups Payload Vault.
+        "local_lookups_count",
     }
     assert set(routing_done.keys()) == expected_keys
     assert routing_done["escalated"] is False

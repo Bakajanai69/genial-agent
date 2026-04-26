@@ -98,3 +98,16 @@ MAX_BRIEFS_PER_SESSION = 20
 
 # Observability (S07) — cahier §17.2
 DAILY_PAPPERS_CREDITS_CAP = 100
+
+# Cap **séparé** sur les tools locaux ``payload_inspect`` /
+# ``payload_search`` exposés par le Payload Vault (S09.5). Ces tools ne
+# consomment **pas** de crédit Pappers et n'ont pas de latence réseau ;
+# ils ne doivent donc pas réduire le budget des 7 vrais tool calls
+# Pappers du tour. On les compte sur un compteur séparé (cf.
+# ``ConversationState.local_lookup_count``).
+#
+# Valeur 5 : couvre largement le cas réaliste (1-3 lookups suffisent
+# d'après la story §"Données factuelles") tout en bornant le coût LLM
+# de prompts pathologiques où l'agent boucle sur des inspects
+# successifs.
+MAX_LOCAL_LOOKUPS_PER_TURN = 5

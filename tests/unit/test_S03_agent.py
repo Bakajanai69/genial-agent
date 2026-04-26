@@ -126,21 +126,23 @@ def test_stringify_tool_result_fallback_preserves_unicode() -> None:
 
 
 def test_stringify_tool_result_fallback_bounded() -> None:
-    # Borne (16k chars) pour éviter de saturer le context window Claude
-    # sur les retours Pappers volumineux (ex: recherche-dirigeants avec
-    # 30+ mandats → 200k+ tokens non tronqués).
+    # Filet de sécurité S09.5 (24K chars, bumpé de 16K depuis l'arrivée
+    # de l'offload Payload Vault — le chemin nominal pour > 12K passe
+    # désormais par le vault, pas par cette troncature). Cf. agent.py
+    # §"Borne de sécurité". Le ``_stringify_tool_result`` reste tronqué
+    # pour les call-sites historiques qui ne passent pas par l'offload.
     payload = {"huge": "x" * 200_000}
     out = _stringify_tool_result(payload)
-    assert len(out) <= 16_000
+    assert len(out) <= 24_000
     assert "tronqué" in out
 
 
 def test_stringify_tool_result_truncates_long_text_block() -> None:
     # Un bloc texte massif (cas réel Pappers) doit aussi être tronqué
-    # — pas seulement le fallback JSON.
+    # — pas seulement le fallback JSON. Borne 24K (S09.5).
     payload = {"content": [{"type": "text", "text": "x" * 200_000}]}
     out = _stringify_tool_result(payload)
-    assert len(out) <= 16_000
+    assert len(out) <= 24_000
     assert out.startswith("x")
     assert "tronqué" in out
 
@@ -222,9 +224,11 @@ def test_truncate_returns_raw_when_short() -> None:
 
 def test_truncate_prefers_newline_boundary() -> None:
     # Construction : beaucoup de lignes, dernière ligne proche du cutoff.
-    body = ("ligne A\n" * 2_100) + "xxxxx"  # ~18k chars avec newlines fréquents
+    # Borne S09.5 = 24K chars : il faut ~3000+ lignes de 8 chars pour
+    # dépasser le seuil.
+    body = ("ligne A\n" * 3_200) + "xxxxx"  # ~25.6k chars
     out = _truncate_tool_result(body)
-    assert len(out) <= 16_000
+    assert len(out) <= 24_000
     # On coupe sur un \n → la portion tronquée ne contient pas de "xxxxx"
     # orphelin au milieu d'une ligne.
     assert out.endswith(
@@ -236,9 +240,10 @@ def test_truncate_prefers_newline_boundary() -> None:
 def test_truncate_falls_back_to_comma_then_space() -> None:
     # Payload sans aucun newline mais avec virgules → on coupe sur la
     # dernière virgule de la fenêtre (propre pour un JSON-like).
-    body = ",".join([f"item{i}" for i in range(5_000)])
+    # Borne 24K = ~3000+ items de 8 chars (item1234,) ≈ 27K.
+    body = ",".join([f"item{i}" for i in range(7_000)])
     out = _truncate_tool_result(body)
-    assert len(out) <= 16_000
+    assert len(out) <= 24_000
     # Le dernier item avant le marker doit être complet (pas "item123" →
     # "item12" tronqué au milieu).
     core = out.removesuffix("\n…[tronqué : réponse Pappers dépasse la borne agent]")
@@ -252,7 +257,7 @@ def test_truncate_brute_cut_when_no_separator() -> None:
     # longueur reste bornée.
     body = "x" * 50_000
     out = _truncate_tool_result(body)
-    assert len(out) <= 16_000
+    assert len(out) <= 24_000
     assert out.endswith("…[tronqué : réponse Pappers dépasse la borne agent]")
 
 

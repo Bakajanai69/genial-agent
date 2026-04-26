@@ -296,3 +296,52 @@ il a une auto-conscience de ses limites. C'est un argument fort
 pour Fabien : *« on ne livre pas une démo bidouillée, on livre
 un agent qui a passé un dogfooding sérieux et qui assume ses
 limites avec transparence. »*
+
+---
+
+## Après S09.5 — Payload Vault générique
+
+Story livrée : [`docs/stories/S09.5-mcp-payload-handling.md`](./stories/S09.5-mcp-payload-handling.md).
+Approche **J — Generic Payload Vault + LLM-driven retrieval** :
+tout payload MCP > 12 K chars est offload dans un vault session-scoped
+in-memory ; l'agent reçoit un index compact (squelette JSON, tailles
+d'arrays, previews) + un `payload_id` et ré-interroge via 2 nouveaux
+tools locaux `payload_inspect` (JSONPath) / `payload_search` (regex).
+Cf. `src/genial_agent/payload_vault.py`.
+
+### Avant / après — G1 Carrefour CA (worst case 706 K chars)
+
+| Métrique | **Avant S09.5** (cap 16 K) | **Après S09.5** (offload) |
+|---|---|---|
+| Taille brute | 706 019 chars | 706 019 chars |
+| Vu par l'agent | 16 000 chars (2.3 %) | 706 019 chars **via vault** + index 4 K injecté |
+| Pertes effectives | **97.7 %** (bilans 2017-2024 absents) | **0 %** (toute donnée accessible via lookups) |
+| Réponse "tronqué" | Oui (cf. F1 §"Conclusions") | **Non** |
+| CA cité | "remontent à 2016" (incorrect) | **11.77 Mds €, bilan clos 31/12/2024** ✅ |
+| Tool calls Pappers | 2 | 2 (inchangé — cache absorbe les retours) |
+| Local lookups | 0 (n'existait pas) | 5 (cap S05 séparé `MAX_LOCAL_LOOKUPS_PER_TURN`) |
+
+Trace complète : [`traces/S095_iterations.md`](../traces/S095_iterations.md)
+§"Step 1 — Pilote ``comptes-entreprise`` × G1 Carrefour".
+
+### Conséquence pour les findings F1-F5
+
+| # | Finding initial | État post-S09.5 |
+|---|---|---|
+| F1 | Comptes-entreprise tronqué, agent voit les vieux bilans | **Résolu** — l'agent navigue le payload complet via vault. |
+| F2 | System prompt ne pousse pas à `annee=` | Devenu obsolète — l'agent peut récupérer toutes les années via inspect/search. |
+| F3 | `sirenisateur(Carrefour)` → Hypermarchés SNC pas SA | Inchangé (UX guideline, pas de bug). |
+| F4 | Cartographie-entreprise tronqué 38 % sur LVMH | **Résolu** — offload couvre aussi cartographie > 12 K. |
+| F5 | Agent transparent quand il ne sait pas | **Préservé** — le pattern "je n'invente pas" survit, juste avec moins de cas où l'agent doit avouer. |
+
+### Recommandation Loom révisée
+
+Le finding F5 reste un différentiant fort : l'agent dit *« je n'ai
+pas trouvé X »* quand Pappers ne couvre pas. **L'agent dit moins
+souvent qu'il a "tronqué" maintenant** — c'est une amélioration de
+fond.
+
+À montrer en plus dans le Loom :
+- **G1 Carrefour CA** (CA récent + date + source) — désormais propre.
+- **G3 comparaison Carrefour vs Casino sur 3 ans** — multi-année
+  fonctionnel grâce à l'offload + lookups ciblés par année.

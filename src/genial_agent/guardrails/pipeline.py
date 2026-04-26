@@ -181,6 +181,15 @@ async def run_guarded_turn(
                 # (``{"siren": "...", ...}``). Cf. annexe B de la story.
                 preview = event.get("content_preview") or ""
                 allowed_sirens |= extract_sirens(preview, luhn_only=True)
+            elif etype == "payload_offloaded":
+                # S09.5 — un payload MCP volumineux a été rangé dans le
+                # vault session. L'event est forwarded inchangé pour la
+                # UI (steps view S06) ; on incrémente le compteur S07.
+                stats_incr(payloads_offloaded_total=1)
+            elif etype == "payload_inspected":
+                stats_incr(payload_inspects_total=1)
+            elif etype == "payload_searched":
+                stats_incr(payload_searches_total=1)
     finally:
         await routed.aclose()
 

@@ -53,7 +53,11 @@ from genial_agent.agent import ConversationState, run_turn
 # Cahier §5.3, §14.3 C4, README "Décisions de cohérence". Avant S05, un
 # ``try/except ImportError`` fallback local vivait ici — retiré à la
 # merge S05 (la story S05 fige ces constantes).
-from genial_agent.guardrails.caps import MAX_TOOL_CALLS_PER_TURN, WALL_CLOCK_S
+from genial_agent.guardrails.caps import (
+    MAX_LOCAL_LOOKUPS_PER_TURN,
+    MAX_TOOL_CALLS_PER_TURN,
+    WALL_CLOCK_S,
+)
 from genial_agent.models import ModelTier
 
 logger = structlog.get_logger(__name__)
@@ -120,6 +124,13 @@ def pick_initial_tier(user_message: str) -> ModelTier:
 REASON_CODE_SELF = "self"
 REASON_CODE_CAP_TOOL_CALLS = "cap_tool_calls_per_turn"
 REASON_CODE_CAP_WALL_CLOCK = "cap_wall_clock"
+# Cap local lookups (S09.5) — payload_inspect / payload_search.
+# Atteint quand l'agent fait > MAX_LOCAL_LOOKUPS_PER_TURN lookups dans
+# le vault sur un seul tour. N'escalade pas (Sonnet ferait pareil) ;
+# on stoppe la boucle et on émet ``capped`` pour que la couche pipeline
+# affiche le statut. La réponse est dégradée mais cohérente avec ce que
+# l'agent a déjà extrait.
+REASON_CODE_CAP_LOCAL_LOOKUPS = "cap_local_lookups_per_turn"
 
 # Cap de longueur sur le ``reason`` text libre fourni par Haiku via
 # ``escalate_to_sonnet.input.reason``. Défense en profondeur contre
@@ -203,6 +214,7 @@ async def run_routed_turn(
     logger.info("routing_initial", tier=initial_tier.value)
 
     initial_count = state.tool_calls_count
+    initial_local_count = state.local_lookup_count
     deadline = time.monotonic() + WALL_CLOCK_S
     escalated = False
     escalation_reason_code: str | None = None
@@ -211,12 +223,19 @@ async def run_routed_turn(
     capped_in_sonnet = False  # set si cap atteint alors qu'on est déjà Sonnet
     capped_reason_code: str | None = None
     capped_reason: str | None = None
+    local_lookups_capped = False
 
     def _per_turn() -> int:
         return state.tool_calls_count - initial_count
 
+    def _local_per_turn() -> int:
+        return state.local_lookup_count - initial_local_count
+
     def _hit_cap_tool_calls() -> bool:
         return _per_turn() >= MAX_TOOL_CALLS_PER_TURN
+
+    def _hit_cap_local_lookups() -> bool:
+        return _local_per_turn() >= MAX_LOCAL_LOOKUPS_PER_TURN
 
     def _emit_cap_hit(reason_code: str, reason_detail: str) -> dict[str, Any]:
         """Fabrique l'event à émettre quand un cap backend est atteint,
@@ -332,6 +351,27 @@ async def run_routed_turn(
                     capped_reason = reason_detail
                     capped_in_sonnet = True
                 break
+
+            # --- Cap local lookups par-turn (S09.5) ---
+            # Tools ``payload_inspect`` / ``payload_search`` : ne consomment
+            # pas de crédit Pappers ni de latence réseau, donc compteur
+            # séparé. **Pas d'escalade** Haiku→Sonnet sur ce cap : Sonnet
+            # ferait les mêmes lookups, l'escalade ne résout rien. On
+            # stoppe la boucle et on émet ``capped`` (les deux tiers).
+            if _hit_cap_local_lookups():
+                per_turn = _local_per_turn()
+                reason_detail = f"{per_turn}/{MAX_LOCAL_LOOKUPS_PER_TURN} local lookups"
+                logger.warning("routing_cap_local_lookups", per_turn_count=per_turn)
+                yield {
+                    "type": "capped",
+                    "reason_code": REASON_CODE_CAP_LOCAL_LOOKUPS,
+                    "reason": reason_detail,
+                    "count": per_turn,
+                }
+                capped_reason_code = REASON_CODE_CAP_LOCAL_LOOKUPS
+                capped_reason = reason_detail
+                local_lookups_capped = True
+                break
     finally:
         # Essentiel : libère state.lock en forçant le cleanup du
         # generator S03 (async with state.lock: fin de bloc). Sans
@@ -363,15 +403,21 @@ async def run_routed_turn(
         else ModelTier.HAIKU.value
     )
     tool_calls_per_turn = state.tool_calls_count - initial_count
+    local_lookups_per_turn = state.local_lookup_count - initial_local_count
+    # Le flag ``capped`` est positionné dès qu'**un** cap a stoppé la
+    # boucle (qu'on soit Sonnet ou Haiku). Le cap local lookups (S09.5)
+    # ne fait pas escalader Haiku — il marque juste ``capped`` vrai.
+    capped_flag = capped_in_sonnet or local_lookups_capped
     logger.info(
         "routing_done",
         model_used=model_used,
         escalated=escalated,
         escalation_mode=escalation_mode,
         escalation_reason_code=escalation_reason_code,
-        capped=capped_in_sonnet,
+        capped=capped_flag,
         capped_reason_code=capped_reason_code,
         tool_calls_count=tool_calls_per_turn,
+        local_lookups_count=local_lookups_per_turn,
     )
     yield {
         "type": "routing_done",
@@ -380,8 +426,9 @@ async def run_routed_turn(
         "escalation_mode": escalation_mode,
         "escalation_reason_code": escalation_reason_code,
         "escalation_reason": escalation_reason,
-        "capped": capped_in_sonnet,
+        "capped": capped_flag,
         "capped_reason_code": capped_reason_code,
         "capped_reason": capped_reason,
         "tool_calls_count": tool_calls_per_turn,
+        "local_lookups_count": local_lookups_per_turn,
     }
