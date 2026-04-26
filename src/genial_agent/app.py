@@ -24,46 +24,50 @@ import uuid
 import chainlit as cl
 import structlog
 
-from genial_agent import mcp_pappers
-from genial_agent.agent import ConversationState
-from genial_agent.config import settings
+# S09.7 hotfix ordre imports : bootstrap DOIT précéder l'import de
+# ``mcp_pappers`` (qui charge ``mcp_cache.cache`` au module-load et
+# tente de lire ``MCP_CACHE_PERSIST_PATH``). Sans ça, le cache se
+# charge avant que le bootstrap ait copié le bake → ``/data/...``
+# → file_absent → cache in-memory vide jusqu'au prochain redémarrage.
+# Validé live sur le déploiement 826c6c9d (logs : mcp_cache_load_skip
+# avant data_bootstrap_copy).
 from genial_agent.data_bootstrap import bootstrap_volume_from_bake
-from genial_agent.guardrails import budget, run_guarded_turn
-from genial_agent.guardrails.caps import DAILY_PAPPERS_CREDITS_CAP
-from genial_agent.observability import (
+
+bootstrap_volume_from_bake()
+
+from genial_agent import mcp_pappers  # noqa: E402
+from genial_agent.agent import ConversationState  # noqa: E402
+from genial_agent.config import settings  # noqa: E402
+from genial_agent.guardrails import budget, run_guarded_turn  # noqa: E402
+from genial_agent.guardrails.caps import DAILY_PAPPERS_CREDITS_CAP  # noqa: E402
+from genial_agent.observability import (  # noqa: E402
     cache as idempotence_cache,
 )
-from genial_agent.observability import (
+from genial_agent.observability import (  # noqa: E402
     configure_logging,
     mount_routes,
 )
-from genial_agent.observability import (
+from genial_agent.observability import (  # noqa: E402
     degraded as credits_degraded,
 )
-from genial_agent.observability import (
+from genial_agent.observability import (  # noqa: E402
     incr as stats_incr,
 )
-from genial_agent.observability import (
+from genial_agent.observability import (  # noqa: E402
     remaining as credits_remaining,
 )
-from genial_agent.ui.chainlit_data_layer import (
+from genial_agent.ui.chainlit_data_layer import (  # noqa: E402
     SESSION_OWNER_KEY,
     AnonymousSQLiteDataLayer,
 )
-from genial_agent.ui.entity_tracker import (
+from genial_agent.ui.entity_tracker import (  # noqa: E402
     ActiveEntity,
     extract_active_entity,
     format_banner,
 )
-from genial_agent.ui.events import TurnState, dispatch_event
-from genial_agent.ui.post_process import linkify_sirens, model_badge
-from genial_agent.ui.starters import STARTERS
-
-# S09.6 — Bootstrap du volume Railway depuis le bake Docker AVANT que
-# le ToolCache et le ChainlitDataLayer ne lisent leurs fichiers. No-op
-# en local (le volume /data n'existe pas) — le cache lit alors le bake
-# directement via ``MCP_CACHE_PERSIST_PATH=data/mcp_cache.json`` en CWD.
-bootstrap_volume_from_bake()
+from genial_agent.ui.events import TurnState, dispatch_event  # noqa: E402
+from genial_agent.ui.post_process import linkify_sirens, model_badge  # noqa: E402
+from genial_agent.ui.starters import STARTERS  # noqa: E402
 
 # S07 — configurer structlog JSON + monter /health et /stats AVANT que
 # Chainlit serve la 1ère requête. Les deux fonctions sont idempotentes

@@ -24,11 +24,25 @@ def test_dockerfile_exists() -> None:
 
 
 def test_non_root_user() -> None:
+    """Le runtime doit s'exécuter en agent (uid 1000), pas root.
+
+    S09.7 hotfix : on autorise les 2 patterns équivalents :
+    1. ``USER agent`` directive Dockerfile (pattern historique S08).
+    2. ``ENTRYPOINT /entrypoint.sh`` qui setpriv → uid 1000 (pattern
+       S09.7, nécessaire pour chown /data au boot avant switch user).
+    Dans les 2 cas, le user effectif au runtime de Chainlit reste
+    agent uid 1000.
+    """
     content = _read()
-    assert re.search(r"^USER\s+agent\s*$", content, re.MULTILINE), (
-        "Le runtime stage doit basculer en USER agent (uid 1000)."
+    assert "useradd" in content, "user agent (uid 1000) doit être créé"
+    has_user_directive = bool(re.search(r"^USER\s+agent\s*$", content, re.MULTILINE))
+    has_setpriv_entrypoint = bool(
+        re.search(r"^ENTRYPOINT\s+\[\s*\"/entrypoint\.sh\"\s*\]\s*$", content, re.MULTILINE)
     )
-    assert "useradd" in content
+    assert has_user_directive or has_setpriv_entrypoint, (
+        "Le runtime stage doit basculer en agent (uid 1000) via USER directive "
+        "OU via /entrypoint.sh + setpriv (pattern S09.7 hotfix volume Railway)."
+    )
 
 
 def test_cmd_shell_form_for_port_expansion() -> None:
