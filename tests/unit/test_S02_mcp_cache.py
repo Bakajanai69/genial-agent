@@ -60,6 +60,73 @@ def test_key_stable_and_sorted() -> None:
     assert ToolCache.key("foo", {"x": 1}) != ToolCache.key("bar", {"x": 1})
 
 
+# ── S09.7 : canonicalisation des listes de scalaires ─────────────────
+
+
+def test_key_lists_of_scalars_order_invariant() -> None:
+    """L'ordre des éléments dans une liste de scalaires (ex:
+    ``return_fields=[...]``) ne doit pas changer la clé.
+
+    Régression : observation live LVMH conv1/conv2 (2026-04-26) où
+    l'agent Haiku varie l'ordre de ``return_fields`` entre 2 sessions
+    → cache miss → 1 PAYG payé en double pour la même donnée.
+    """
+    args_a = {"siren": "775670417", "return_fields": ["a", "b", "c"]}
+    args_b = {"siren": "775670417", "return_fields": ["c", "a", "b"]}
+    assert ToolCache.key("recherche-entreprises", args_a) == ToolCache.key(
+        "recherche-entreprises", args_b
+    )
+
+
+def test_key_lists_of_scalars_dedup() -> None:
+    """Les doublons dans une liste de scalaires sont éliminés.
+    ``["a", "a", "b"]`` → même clé que ``["a", "b"]``."""
+    k_dup = ToolCache.key("foo", {"return_fields": ["a", "a", "b"]})
+    k_uniq = ToolCache.key("foo", {"return_fields": ["a", "b"]})
+    assert k_dup == k_uniq
+
+
+def test_key_lists_of_dicts_order_preserved() -> None:
+    """Les listes contenant des **dicts** (ou autres objets composés)
+    gardent leur ordre — peut porter un sens (étapes, pagination).
+    Aucun tool Pappers retenu n'est dans ce cas, mais on garde la
+    safety."""
+    args_a = {"steps": [{"step": 1}, {"step": 2}]}
+    args_b = {"steps": [{"step": 2}, {"step": 1}]}
+    assert ToolCache.key("foo", args_a) != ToolCache.key("foo", args_b)
+
+
+def test_key_subset_still_distinct() -> None:
+    """Un vrai sous-ensemble de ``return_fields`` doit produire une
+    clé distincte (l'agent demande moins de champs → réponse Pappers
+    différente, donc cache différent légitime)."""
+    full = ToolCache.key("foo", {"return_fields": ["a", "b", "c"]})
+    subset = ToolCache.key("foo", {"return_fields": ["a", "b"]})
+    assert full != subset
+
+
+def test_key_canonicalize_handles_mixed_types() -> None:
+    """Listes mixtes ``[1, "1"]`` ne doivent pas crasher (pattern
+    rare mais possible si le LLM mixe entier/string)."""
+    k = ToolCache.key("foo", {"items": [1, "1", 2, "2"]})
+    assert isinstance(k, str)
+    assert k.startswith("foo:")
+
+
+def test_key_canonicalize_empty_list_no_crash() -> None:
+    """Liste vide → clé valide, pas de tri à faire."""
+    k = ToolCache.key("foo", {"return_fields": []})
+    assert isinstance(k, str)
+
+
+def test_key_canonicalize_nested_dict_with_list() -> None:
+    """Récursion dict → list : la canonicalisation descend dans les
+    sous-niveaux (ex: ``{"filters": {"tags": ["b","a"]}}``)."""
+    k_a = ToolCache.key("foo", {"filters": {"tags": ["b", "a"]}})
+    k_b = ToolCache.key("foo", {"filters": {"tags": ["a", "b"]}})
+    assert k_a == k_b
+
+
 # ── LRU bounded size (review C5) ─────────────────────────────────────
 
 

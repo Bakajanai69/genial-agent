@@ -93,6 +93,45 @@ class _Entry:
     expires_at: float
 
 
+def _canonicalize_args(value: Any) -> Any:
+    """Normalise récursivement les args avant hashing du cache.
+
+    S09.7 hotfix : un LLM Haiku (température 0.2) qui choisit
+    ``return_fields=["a","b","c"]`` une fois et ``["c","b","a"]`` la
+    fois suivante produit deux clés cache distinctes — alors que pour
+    Pappers c'est sémantiquement identique. On trie + dédup les listes
+    de **scalaires** (str/int/float/bool) pour rendre la clé robuste
+    à l'ordre.
+
+    Listes de dicts/objets : ordre préservé. Si un futur tool MCP
+    dépend de l'ordre d'une liste de primitives, il devra passer par
+    un dict explicite (``{"step_1": "x", "step_2": "y"}``) — borne de
+    safety acceptable car aucun tool Pappers retenu n'est dans ce cas.
+
+    Performance : O(N log N) sur les listes triées, négligeable vs le
+    coût d'un appel réseau Pappers (~2 s).
+    """
+    if isinstance(value, dict):
+        return {k: _canonicalize_args(v) for k, v in value.items()}
+    if isinstance(value, list):
+        # Liste de **scalaires** uniquement → sort + dédup. Tout
+        # élément complexe (dict/list/None/...) → on préserve l'ordre.
+        # ``bool`` est une sous-classe de ``int`` en Python — pas besoin
+        # de le lister explicitement.
+        if value and all(isinstance(x, str | int | float) for x in value):
+            try:
+                # Clé de tri ``(type_name, x)`` pour gérer les listes
+                # mixtes ``[1, "1"]`` sans crash ("1" < 1 lèverait
+                # TypeError sinon).
+                return sorted(set(value), key=lambda x: (type(x).__name__, x))
+            except TypeError:
+                # Filet de sécurité : si dédup échoue (objets non hashables
+                # qui auraient fui le check), on garde l'ordre original.
+                return value
+        return [_canonicalize_args(x) for x in value]
+    return value
+
+
 class ToolCache:
     """Cache thread-safe (asyncio) LRU + TTL + single-flight.
 
@@ -179,9 +218,24 @@ class ToolCache:
     @staticmethod
     def key(tool_name: str, args: dict[str, Any]) -> str:
         """Clé canonique. ``default=str`` évite un crash sur les types non
-        JSON-natifs (datetime, Enum, Decimal…) — cf. review S02 C7."""
+        JSON-natifs (datetime, Enum, Decimal…) — cf. review S02 C7.
+
+        S09.7 hotfix : on **canonicalise** les args avant hashing pour
+        que ``[a,b,c]`` et ``[c,b,a]`` produisent la même clé
+        (cf. observation live conv1/conv2 LVMH 2026-04-26 où l'agent
+        Haiku a varié l'ordre de ``return_fields`` entre 2 sessions →
+        cache miss artificiel → 1 PAYG payé en double).
+
+        On ne sort QUE les listes de **scalaires** (str/int/float/bool).
+        Les listes de dicts/objets gardent leur ordre (peuvent porter
+        un sens — pagination, séquence). Aucun tool MCP read-only
+        recensé chez Pappers ne dépend de l'ordre d'une liste de
+        primitives — borne de safety si jamais un futur tool en
+        dépendait : il faudrait passer les args via un dict explicite
+        ``{"step": 1, "value": "x"}`` au lieu d'une liste pure.
+        """
         args_canon = json.dumps(
-            args,
+            _canonicalize_args(args),
             sort_keys=True,
             separators=(",", ":"),
             default=str,
