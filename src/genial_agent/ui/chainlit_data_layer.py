@@ -138,8 +138,13 @@ def _resolve_owner_id() -> str:
     except Exception:  # noqa: BLE001, S110
         pass
 
-    # 4. Hors contexte (tests unit, scripts).
-    return ANONYMOUS_USER_ID
+    # 4. Hors contexte (tests unit, scripts) ou auth pas encore résolue.
+    # S09.7 hotfix v4 : on retourne un **sentinel qui ne match aucun
+    # thread** (pas ANONYMOUS_USER_ID qui matchait les threads pollués
+    # pré-fix v3). Si on retourne ANONYMOUS_USER_ID ici, list_threads
+    # appelé hors contexte WebSocket leakerait les threads anonymous
+    # à tout le monde.
+    return "__no_owner_resolved__"
 
 
 # Schéma minimal — 3 tables : threads, steps, feedbacks. Pas de table
@@ -424,11 +429,17 @@ class AnonymousSQLiteDataLayer(BaseDataLayer):
         """
         conn = await self._get_conn()
         limit = max(1, pagination.first or 20)
-        owner = _resolve_owner_id()
+        # S09.7 hotfix v4 : Chainlit passe ``filters.userId`` (l'identifier
+        # de l'User retourné par auth_callback). C'est la source de vérité
+        # pour le filtrage — plus fiable que ``_resolve_owner_id()`` qui
+        # pouvait retourner ``ANONYMOUS_USER_ID`` hors contexte WebSocket
+        # → match les threads pollués pré-fix v3 (créés avec
+        # user_id="anonymous").
+        owner = filters.userId or _resolve_owner_id()
         logger.info(
             "chainlit_data_layer_list_threads",
-            owner_id_prefix=owner[:12] if owner else None,
-            owner_is_anonymous=(owner == ANONYMOUS_USER_ID),
+            owner_prefix=str(owner)[:16],
+            from_filters=bool(filters.userId),
         )
 
         sql = "SELECT * FROM threads WHERE user_id = ?"

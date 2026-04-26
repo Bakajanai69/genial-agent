@@ -46,10 +46,17 @@ async def test_get_user_propagates_identifier(layer: AnonymousSQLiteDataLayer) -
 
 
 async def test_create_thread_via_update_then_fetch(
-    layer: AnonymousSQLiteDataLayer,
+    layer: AnonymousSQLiteDataLayer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Chainlit n'a pas de ``create_thread`` distinct — ``update_thread``
-    fait l'UPSERT. ``get_thread`` doit retourner les valeurs persistées."""
+    fait l'UPSERT. ``get_thread`` doit retourner les valeurs persistées.
+
+    On force un owner explicite via monkeypatch puisque hors contexte
+    Chainlit le fallback est désormais ``__no_owner_resolved__``
+    (sentinel anti-fuite, S09.7 hotfix v4)."""
+    import genial_agent.ui.chainlit_data_layer as module
+
+    monkeypatch.setattr(module, "_resolve_owner_id", lambda: "test-owner")
     await layer.update_thread(
         "thread-1",
         name="LVMH fiche identité",
@@ -60,7 +67,7 @@ async def test_create_thread_via_update_then_fetch(
     assert fetched is not None
     assert fetched["id"] == "thread-1"
     assert fetched["name"] == "LVMH fiche identité"
-    assert fetched["userIdentifier"] == ANONYMOUS_USER_ID
+    assert fetched["userIdentifier"] == "test-owner"
     assert fetched["metadata"] == {"locale": "fr"}
     assert fetched["tags"] == ["demo"]
     assert fetched["steps"] == []
@@ -337,7 +344,6 @@ async def test_legacy_anonymous_threads_invisible_to_other_owners(
     Auparavant ils l'étaient "pour rétrocompat" → fuite cross-visiteur.
     """
     import genial_agent.ui.chainlit_data_layer as module
-    from genial_agent.ui.chainlit_data_layer import ANONYMOUS_USER_ID
 
     db = tmp_path / "cl.db"
     layer = AnonymousSQLiteDataLayer(db_path=str(db))
@@ -369,11 +375,11 @@ async def test_legacy_anonymous_threads_invisible_to_other_owners(
 
 
 async def test_resolve_owner_id_falls_back_outside_chainlit_context() -> None:
-    """``_resolve_owner_id`` doit retourner ``ANONYMOUS_USER_ID`` quand
-    appelé hors contexte Chainlit (cas tests unit, scripts CLI)."""
-    from genial_agent.ui.chainlit_data_layer import (
-        ANONYMOUS_USER_ID,
-        _resolve_owner_id,
-    )
+    """S09.7 hotfix v4 : hors contexte Chainlit, ``_resolve_owner_id``
+    retourne désormais le sentinel ``__no_owner_resolved__`` (au lieu
+    de ``ANONYMOUS_USER_ID``). Raison : ``ANONYMOUS_USER_ID`` matchait
+    les threads pollués pré-fix v3 et causait une fuite cross-visiteur
+    quand list_threads était appelé hors contexte WebSocket."""
+    from genial_agent.ui.chainlit_data_layer import _resolve_owner_id
 
-    assert _resolve_owner_id() == ANONYMOUS_USER_ID
+    assert _resolve_owner_id() == "__no_owner_resolved__"
