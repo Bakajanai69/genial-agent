@@ -419,18 +419,60 @@ X.Y"*, ouvrir une story S09.8 pour retirer les ~15 lignes de
 `WORKAROUND_HINTS` dans `mcp_pappers.py` + tests associés
 (`tests/unit/test_S096_fallback.py`).
 
-### Crédits consommés en phase 2 dev
+### Crédits consommés en phase 2 dev (run live 2026-04-26)
 
 Cible story : < 50 abo + < 30 PAYG.
 
 | Action | Crédits |
 |---|---:|
-| `probe_tools_matrix.py` (A1) — non joué dans cette session, à exécuter optionnellement | 0 (à prévoir : ~6 PAYG) |
+| `scripts/probe_tools_matrix.py` (A1) — confirme la matrice live | **6 PAYG** |
+| `make test-integration` (`test_S095_golden_prompts.py`) — 5/5 passe | **13 PAYG** |
+| `make test-integration` (`test_S09_adversarial.py`) — 10/10 maintenu | **3 PAYG** |
 | Tests unit S09.6 (test_S096_*.py) | 0 (mocks) |
-| **Cumul phase 2 dev S09.6** | **0** (les modifications sont code-only ; le pre-warm `comptes-entreprise` réel est un usage opérateur, hors phase 2 dev) |
+| **Cumul phase 2 dev S09.6** | **22 PAYG** |
 
-→ Sous le cap. La prochaine consommation aura lieu via
-``make prewarm-comptes`` au refill abo (le 30/04) — ~24 crédits abo
-estimés pour les 4 entités × 3 années.
+→ Sous le cap (< 30 PAYG). Abo inchangé (0/500 utilisé, toujours
+saturé après refill 30/04). PAYG résiduel : 47 → marge confortable
+pour la review phase 3.
+
+### Validation live observée — 5/5 golden passent (2026-04-26)
+
+| # | Prompt | Cible S09.6 | Résultat |
+|---|---|---|---|
+| G1 | "Quel est le dernier CA de Carrefour ?" | ≥ 1 valeur CA récente avec date bilan ≥ 2022 | ✅ |
+| G2 | "Quels sont les mandats de Bernard Arnault ?" | **≥ 5 SIRENs distincts** | ✅ |
+| G3 | "Compare Carrefour vs Casino sur 3 ans" | 3 années + ≥ 6 chiffres datés | ✅ |
+| G4 | "Résultat net LVMH 2023" | **valeur chiffrée présente** | ✅ |
+| G5 | "Liste filiales LVMH" | ≥ 15 SIRENs distincts | ✅ |
+
+Pack adversarial S09 : **10/10 maintenu** (T1-T10 tous PASSED).
+
+### Note sur la persistance cache pendant les tests integration
+
+La fixture `_fresh_cache` (`tests/conftest.py:53`) remplace le cache
+module-level par un `ToolCache()` neuf **sans persist_path** avant
+chaque test (isolation forte attendue). Les 13 PAYG consommés par les
+golden ne se sont donc PAS persistés sur disque — comportement par
+contrat des tests pytest, **distinct** de la démo Railway (chat web)
+qui charge le cache disque persistant via le module-level `cache` à
+l'import et bénéficie ainsi du pré-warm.
+
+Pour la démo Fabien : les 4 starters fixes (LVMH fiche, mandats Bernard
+Arnault, comparaison Carrefour vs Casino, KYC SIREN 552032534) sont
+servis depuis le cache disque actuel (9 entrées : sirenisateurs +
+recherche-dirigeants + cartographie LVMH) sans appel live, modulo
+``recherche-dirigeants(q="Bernard Arnault")`` 1ʳᵉ exécution = 1 PAYG
+puis cache hit.
+
+### Limite cache `comptes-entreprise` (à pré-warmer le 30/04)
+
+Le pré-warm `make prewarm-comptes` n'a **pas** été exécuté dans cette
+session (abo à 0/500, 0 jeton abo dispo + bug PAYG sur ce tool). Conformément
+à la story §"Étapes phase 2" step 6, à relancer **au refill abo le
+30/04** pour bake les payloads `comptes-entreprise(LVMH/BNP/Carrefour/Casino,
+2022/2023/2024)` dans `data/mcp_cache.json`. Coût attendu : ~24 crédits
+abo (4 × 3 × 2). Une fois fait, G3/G4 tourneront avec 0 crédit live
+en mode démo (la fixture `_fresh_cache` reste en place pour pytest,
+c'est intentionnel).
 
 Toujours sous le cap mou < 50.
