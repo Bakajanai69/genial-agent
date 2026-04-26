@@ -55,6 +55,15 @@ COPY --chown=agent:agent data ./data
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
+# S09.7 hotfix : sans ``USER agent`` global, le dossier ``/app`` reste
+# root-owned (créé par WORKDIR au boot du stage runtime). Quand
+# l'entrypoint switche en agent (uid 1000), Chainlit essaie de créer
+# ``/app/.files`` (FILES_DIRECTORY interne) → PermissionError.
+# On chown récursivement /app à agent au build (les COPY ont déjà
+# chown les contenus, mais pas le dossier parent ni les futurs sous-
+# dossiers créés au runtime).
+RUN chown -R agent:agent /app
+
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
