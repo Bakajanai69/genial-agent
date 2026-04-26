@@ -23,6 +23,31 @@
 //   [UI]
 //   custom_js = "/public/owner-cookie.js"
 (function () {
+    // S09.7 hotfix UX — anti-FOUC (Flash Of Unstyled Content) au tout
+    // 1er pageload. Le HTML Chainlit servi est minimal (juste
+    // ``<div id="root"></div>``) et le React app + le theme dark sont
+    // appliqués après le bundle JS chargé (~200-500 ms). Pendant ce
+    // délai, le navigateur affiche du blanc + le logo splash en grand
+    // → impression "page cassée" au tout 1er load. Ce JS est chargé
+    // avec ``defer`` donc s'exécute juste après le parsing HTML mais
+    // AVANT que React ne monte → on force le fond noir immédiatement.
+    // Au refresh suivant, les assets sont en cache navigateur et le
+    // flash n'est plus visible.
+    try {
+        document.documentElement.style.backgroundColor = "#0a0a0a";
+        if (document.body) {
+            document.body.style.backgroundColor = "#0a0a0a";
+        } else {
+            // body pas encore parsé : on attend DOMContentLoaded.
+            document.addEventListener("DOMContentLoaded", function () {
+                document.body.style.backgroundColor = "#0a0a0a";
+            });
+        }
+    } catch (e) {
+        // No-op : si le DOM n'est pas accessible (sandbox iframe extrême),
+        // l'utilisateur verra juste le flash habituel.
+    }
+
     const KEY = "genial_owner_id";
     let id = null;
     try {
