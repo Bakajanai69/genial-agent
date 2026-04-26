@@ -304,6 +304,8 @@ class AnonymousSQLiteDataLayer(BaseDataLayer):
             logger.info(
                 "chainlit_data_layer_thread_access_denied",
                 thread_id=thread_id,
+                thread_owner_prefix=str(thread_owner)[:12] if thread_owner else None,
+                request_owner_prefix=owner[:12] if owner else None,
             )
             return None
 
@@ -423,6 +425,11 @@ class AnonymousSQLiteDataLayer(BaseDataLayer):
         conn = await self._get_conn()
         limit = max(1, pagination.first or 20)
         owner = _resolve_owner_id()
+        logger.info(
+            "chainlit_data_layer_list_threads",
+            owner_id_prefix=owner[:12] if owner else None,
+            owner_is_anonymous=(owner == ANONYMOUS_USER_ID),
+        )
 
         sql = "SELECT * FROM threads WHERE user_id = ?"
         params: list[Any] = [owner]
