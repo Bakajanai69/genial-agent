@@ -89,6 +89,16 @@ SEARCH_DEFAULT_CONTEXT_CHARS = 200
 SEARCH_DEFAULT_MAX_MATCHES = 10
 SEARCH_HARD_MAX_MATCHES = 30
 
+# Review S09.7 — cap dur sur le nombre de matches retournés par
+# ``_walk_with_jsonpath_ng``. Filet de sécurité contre les wildcards
+# pathologiques (``$..*`` sur un payload Carrefour 706 K peut renvoyer
+# plusieurs dizaines de milliers de nœuds avant que le cap chars
+# ``LOOKUP_MAX_CHARS_HARD`` ne tronque le ``json.dumps`` final). 1 000
+# est très large vs ce qu'on observe en prod (G2 = 39 homonymes, G5 =
+# 16 entreprises) — ne tronque rien en pratique, borne uniquement les
+# cas dégénérés.
+JSONPATH_MAX_MATCHES = 1_000
+
 
 # --- Vault ------------------------------------------------------------------
 
@@ -569,6 +579,13 @@ def _walk_with_jsonpath_ng(node: Any, path: str) -> Any:
     found = expr.find(node)
     if not found:
         return {"_error": f"no match for '{path}' in payload"}
+    # Review S09.7 — cap dur RAM sur les wildcards pathologiques
+    # (``$..*`` sur un payload 700 K peut exploser). On borne avant
+    # d'extraire les ``.value`` pour ne pas matérialiser N copies.
+    truncated_count: int | None = None
+    if len(found) > JSONPATH_MAX_MATCHES:
+        truncated_count = len(found) - JSONPATH_MAX_MATCHES
+        found = found[:JSONPATH_MAX_MATCHES]
     values = [m.value for m in found]
     if len(values) == 1:
         return values[0]
@@ -581,7 +598,7 @@ def _walk_with_jsonpath_ng(node: Any, path: str) -> Any:
     if all(not isinstance(v, dict | list) for v in values):
         sample_keys = _extract_sibling_keys(found)
         if sample_keys:
-            return {
+            envelope: dict[str, Any] = {
                 "_extracted_values": values,
                 "_count": len(values),
                 "_other_fields_available": sample_keys,
@@ -592,6 +609,17 @@ def _walk_with_jsonpath_ng(node: Any, path: str) -> Any:
                     f"items, or chain another wildcard for a different field."
                 ),
             }
+            if truncated_count is not None:
+                envelope["_truncated_more"] = truncated_count
+            return envelope
+    if truncated_count is not None:
+        # Liste tronquée — on appose un marker textuel en queue pour
+        # signaler au LLM (et garder le retour "list of matches" pour
+        # ne pas casser les consommateurs existants qui attendent une
+        # liste).
+        return values + [
+            f"…[_truncated: {truncated_count} more matches over JSONPATH_MAX_MATCHES={JSONPATH_MAX_MATCHES}]"
+        ]
     return values
 
 

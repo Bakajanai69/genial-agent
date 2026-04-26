@@ -76,6 +76,26 @@ Pour générer le token :
 python -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
 
+**S09.7 — variables additionnelles** (cache persistant + sidebar
+conversations cross-session) :
+
+| Variable                       | Valeur                                | Notes                                                   |
+| ------------------------------ | ------------------------------------- | ------------------------------------------------------- |
+| `MCP_CACHE_PERSIST_PATH`       | `/data/mcp_cache.json`                | Chemin cache disque MCP. Si absent → cache in-memory uniquement (perdu au redémarrage) |
+| `CHAINLIT_DATA_LAYER_DB_PATH`  | `/data/cl_threads.db`                 | SQLite des conversations — alimente la sidebar threads. Si absent → sidebar désactivée |
+| `CHAINLIT_AUTH_SECRET`         | JWT ≥ 64 chars URL-safe               | Requis pour `header_auth_callback` (sinon Chainlit n'invoque jamais `list_threads` et la sidebar reste vide silencieusement) |
+
+Pour générer le `CHAINLIT_AUTH_SECRET` :
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(64))"
+```
+
+Les 3 variables ci-dessus sont **liées au volume `/data`** configuré
+en §3 bis ci-dessous. En dev local sans volume, on peut les omettre
+(ou pointer sur `data/` du repo) — la sidebar reste désactivée mais
+l'agent fonctionne.
+
 > ⚠️ **Ne pas** définir `WALL_CLOCK_S_OVERRIDE` côté Railway. La prod
 > EU-West tient le cap cahier 15 s sans override (pertinent uniquement
 > en dev WSL haute latence — cf. review S05).
@@ -84,6 +104,83 @@ python -c "import secrets; print(secrets.token_urlsafe(32))"
 > dashboard. Cliquer « Show » pour vérifier l'équivalence avec
 > `.env` local. **Ne jamais** coller les clés dans une issue / PR /
 > log Railway public.
+
+---
+
+## 3 bis. Volume Railway pour cache persistant + sidebar threads (S09.7)
+
+> Cette étape n'est **pas optionnelle** si on veut la persistance
+> cross-deploy du cache MCP (~17 entrées pré-warmées au boot, économie
+> de crédits Pappers significative) et la sidebar des conversations
+> cross-session façon ChatGPT/Claude (livrée S09.7).
+
+### Création du volume
+
+Via la console Railway :
+
+1. Service → **Settings → Volumes** → **« Create Volume »**.
+2. Nom : `genial-agent-volume` (ou autre, peu importe).
+3. Mount path : **`/data`** (figé, c'est le préfixe attendu par les 2
+   variables `MCP_CACHE_PERSIST_PATH` et `CHAINLIT_DATA_LAYER_DB_PATH`).
+4. Taille : **500 Mo** suffisent largement (cache MCP ~1 Mo, SQLite
+   threads ~10-20 Mo après 100 conversations).
+
+Via l'API GraphQL (alternative scriptable, cf. §"Annexe — API Railway"
+plus bas pour les IDs et le snippet `volumeCreate`).
+
+### Permissions runtime (Railway monte les volumes en `root:root`)
+
+Railway monte les volumes appartenant à `root:root` par défaut. Notre
+runtime tourne en `agent` (uid 1000) — il ne peut pas écrire sur
+`/data` sans intervention. Le hotfix S09.7 (`docker/entrypoint.sh`)
+chown `/data` au boot **avant** le `setpriv` qui switch en agent :
+
+```sh
+# docker/entrypoint.sh (extrait)
+if [ -d "/data" ]; then
+    chown -R agent:agent /data 2>/dev/null || true
+fi
+exec setpriv --reuid=1000 --regid=1000 --init-groups "$@"
+```
+
+Si on retire l'entrypoint ou si on change l'uid runtime, il faut
+mettre à jour ce script en cohérence (sinon `mcp_cache_persist_failed`
+en boucle dans les logs).
+
+### Bootstrap du cache MCP (bake → volume au 1er boot)
+
+Au build, le Dockerfile copie un cache pré-warmé (`data/`) dans
+`/app/data/`. Au runtime, `bootstrap_volume_from_bake()`
+(`src/genial_agent/data_bootstrap.py`) copie ce contenu vers `/data`
+**uniquement si le volume est vide** (idempotent — ne réécrase pas
+les conversations utilisateur accumulées). Logs attendus au boot :
+
+```
+data_bootstrap_copy        action=copy_initial size=937889
+mcp_cache_loaded           loaded=17 skipped_or_expired=0
+```
+
+`bootstrap_volume_from_bake()` est appelé **avant les imports
+applicatifs** dans `app.py` (ligne 37, avant `from genial_agent
+import mcp_pappers`) — l'ordre est critique, ne pas le casser sous
+peine de cache lazy-load qui pointe sur un volume encore vide.
+
+### Pré-warm du cache après refill crédits Pappers
+
+Pour ré-alimenter le cache disque (entités golden LVMH/BNP/Carrefour/
+Casino + recherche-dirigeants Arnault) après un refill mensuel
+Pappers :
+
+```bash
+# En local, sur la machine dev
+uv run python scripts/prewarm_persistent_cache.py
+```
+
+Le script lit `traces/*.jsonl` pour extraire les `(tool, args)`
+connus puis ré-exécute uniquement les appels PAYG-compatibles. Le
+fichier `data/mcp_cache.json` résultant est committé dans le repo
+(< 1 Mo) → automatiquement copié au prochain build vers le bake →
+disponible au runtime via `bootstrap_volume_from_bake`.
 
 ---
 

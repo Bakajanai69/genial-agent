@@ -142,5 +142,14 @@
     // Pose le cookie pour que le backend Chainlit puisse le lire dans
     // les headers HTTP de la WebSocket initiale. ``max-age=31536000`` =
     // 1 an, ``SameSite=Lax`` pour cross-origin Railway/proxy.
-    document.cookie = `${KEY}=${id}; path=/; max-age=31536000; SameSite=Lax`;
+    //
+    // Review S09.7 — ajout ``Secure`` conditionnel à HTTPS : en prod
+    // Railway (HTTPS-only) le flag durcit le cookie contre les fuites
+    // en clear sur un éventuel man-in-the-middle. En dev local
+    // (``http://localhost:8000``) le navigateur refuserait de poser
+    // le cookie ``Secure``, donc on l'omet conditionnellement. Pas de
+    // ``HttpOnly`` : incompatible avec ce design (le JS doit pouvoir
+    // poser le cookie et le ré-écrire au prochain pageload).
+    const secureFlag = (typeof location !== "undefined" && location.protocol === "https:") ? "; Secure" : "";
+    document.cookie = `${KEY}=${id}; path=/; max-age=31536000; SameSite=Lax${secureFlag}`;
 })();
