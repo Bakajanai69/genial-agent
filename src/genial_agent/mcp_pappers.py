@@ -73,16 +73,17 @@ PAPPERS_BASE_URL = "https://mcp.pappers.fr"
 # Pappers fixe le bug — cf. trigger S09.8 dans traces/S095_iterations.md.
 WORKAROUND_HINTS: dict[str, str] = {
     "comptes-entreprise": (
-        "Le tool `comptes-entreprise` est temporairement indisponible "
-        "(crédits abo Pappers épuisés + bug PAYG côté serveur — "
-        "cf. docs/pappers-mcp.md §4.2). "
-        "Workaround : appelle `recherche-entreprises` avec "
-        '``siren=<siren>`` et ``return_fields=["chiffre_affaires", '
-        '"resultat", "capital", "effectif", "annee_finances", '
-        '"annee_effectif"]`` pour obtenir les chiffres headline de la '
-        "dernière année close. Pour des données multi-années détaillées, "
-        "refuse poliment et explique que cette donnée n'est pas accessible "
-        "en ce moment."
+        "Tool `comptes-entreprise` indisponible (crédits abo Pappers "
+        "épuisés + bug PAYG côté serveur, cf. docs/pappers-mcp.md §4.2). "
+        "Tools alternatifs côté Pappers (à la disposition de l'agent "
+        "selon la question posée) : "
+        "`recherche-entreprises` (filtre par `siren` + `return_fields` "
+        "parmi `chiffre_affaires`, `resultat`, `capital`, `effectif`, "
+        "`annee_finances`, `annee_effectif` — couvre les chiffres "
+        "headline d'une année récente, 1 crédit) ; "
+        "`cartographie-entreprise` (filiales et liens groupe). "
+        "Aucune alternative ne couvre les comptes annuels détaillés "
+        "multi-années."
     ),
 }
 
