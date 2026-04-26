@@ -17,3 +17,45 @@
     background: var(--background, transparent);
     flex-shrink: 0;
 }
+
+/* ─── S09.7 UI : couleurs Genial (logo violet/bleu) ──────────────────
+   Couleurs extraites du logo source (genial-logo.png) :
+   - Violet primaire : #6040C0 (couleur #1 dominante du logo)
+   - Bleu accent    : #4080E0 (couleur #2)
+   On override les variables CSS Chainlit (--primary, --primary-foreground)
+   ainsi que les sélecteurs spécifiques pour le bouton d'envoi et les
+   liens hypertexte (SIREN cliquables vers pappers.fr/entreprise/X).
+
+   Fragile : sélecteurs Chainlit 2.11.x. Si le markup change,
+   le fallback se fait sur les variables CSS qui sont plus stables. */
+
+:root {
+    /* Override des variables CSS Chainlit — applique partout où elles
+       sont utilisées (bouton send, accents, focus rings, etc.) */
+    --primary: #6040c0;
+    --primary-foreground: #ffffff;
+}
+
+/* Bouton d'envoi (cercle rose Chainlit par défaut → violet Genial) */
+button[aria-label="Send message"],
+button[data-testid="send-button"],
+#chat-input button[type="submit"] {
+    background-color: #6040c0 !important;
+    color: #ffffff !important;
+}
+button[aria-label="Send message"]:hover,
+button[data-testid="send-button"]:hover,
+#chat-input button[type="submit"]:hover {
+    background-color: #5030b0 !important;
+}
+
+/* Liens hypertexte (SIREN cliquables, lien GitHub footer, etc.)
+   Bleu Genial #4080E0 — meilleure lisibilité que le violet plein
+   sur fond sombre. */
+a[href]:not([data-testid]) {
+    color: #4080e0 !important;
+}
+a[href]:not([data-testid]):hover {
+    color: #60a0f0 !important;
+    text-decoration: underline;
+}
