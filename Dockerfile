@@ -24,11 +24,15 @@ FROM python:${PYTHON_VERSION}-slim-bookworm
 # ne l'embarque pas). --no-install-recommends + rm des apt lists pour
 # garder l'image fine.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl \
+    && apt-get install -y --no-install-recommends curl util-linux \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 1000 agent
 
-USER agent
+# S09.7 hotfix volume Railway : on garde USER root pour permettre à
+# l'entrypoint de chown ``/data`` (monté root:root par Railway). Le
+# script ``docker/entrypoint.sh`` switch ensuite vers agent (uid 1000)
+# via setpriv pour exec Chainlit. ``util-linux`` (apt-get ci-dessus)
+# fournit setpriv.
 WORKDIR /app
 
 # venv + sources + assets Chainlit (config.toml S06, chainlit.md UI,
@@ -46,6 +50,10 @@ COPY --chown=agent:agent .chainlit ./.chainlit
 # SIREN) — pas de secret, pas de PII. Cf. story S09.6 §"Architecture
 # phase 1 — Axe 3 révisé".
 COPY --chown=agent:agent data ./data
+
+# S09.7 hotfix : entrypoint root → chown /data → exec en agent.
+COPY docker/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
@@ -65,6 +73,9 @@ EXPOSE 8000
 # curl spam stderr lors d'un DNS fail / refused au démarrage.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
   CMD curl -fsS "http://localhost:${PORT:-8000}/health" >/dev/null 2>&1 || exit 1
+
+# ENTRYPOINT (root) : chown /data + setpriv → agent uid 1000 + exec CMD.
+ENTRYPOINT ["/entrypoint.sh"]
 
 # Shell-form CMD : ${PORT} expansé par sh. Avec exec-form, Chainlit
 # recevrait littéralement la chaîne "${PORT}" et crasherait.
