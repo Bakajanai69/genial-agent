@@ -683,6 +683,20 @@ async def prewarm_cache(
         logger.debug("pappers_prewarm_skipped_already_done")
         return
 
+    # **Early-set** du flag (review S09.7 hotfix race condition observé
+    # en prod 2026-04-26 16:47:50 — 4 sessions Chainlit parallèles
+    # entraient dans la boucle avant que le post-set du flag ne s'applique,
+    # produisant 2 prewarms concurrents = 4 ``pappers_call_ok`` au lieu
+    # des 2 attendus par cold-start).
+    #
+    # Avec early-set + ``asyncio`` cooperative scheduling : la 1ère
+    # session pose ``_PREWARM_DONE=True`` AVANT le 1er ``await``, donc
+    # toutes les sessions parallèles arrivant ensuite voient le flag
+    # à True et early-return. La 1ère session continue seule la boucle.
+    # Acceptable trade-off : si la 1ère session crash après le set,
+    # on ne retry pas, mais le ``try/except`` autour de chaque ``caller``
+    # swallowe tout — le crash global est extrêmement improbable.
+    _PREWARM_DONE = True
     caller = call or call_tool
     # Review S09.6 P1-6 : Casino ajouté pour aligner avec les 4 entités
     # golden de prewarm_comptes_entreprise.py (LVMH, BNP, Carrefour,
@@ -702,10 +716,6 @@ async def prewarm_cache(
                 error_type=type(exc).__name__,
             )
 
-    # Marquer comme fait UNIQUEMENT après la boucle complète, même si
-    # certains seeds ont échoué : on n'est pas plus avancé en réessayant
-    # sur la prochaine session, et l'objectif (best-effort) est atteint.
-    _PREWARM_DONE = True
     logger.info("pappers_prewarm_done", seeds_count=len(seeds))
 
 

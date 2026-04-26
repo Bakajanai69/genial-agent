@@ -461,6 +461,42 @@ async def test_prewarm_cache_is_idempotent_per_process() -> None:
     assert len(calls) == 8
 
 
+async def test_prewarm_cache_no_race_condition_under_concurrent_calls() -> None:
+    """Review S09.7 hotfix — race condition observée en prod 2026-04-26
+    16:47:50 UTC (deploy ``8c013327``) : 4 sessions Chainlit parallèles
+    entraient dans la boucle prewarm avant que le flag idempotence ne
+    soit posé, produisant 2 prewarms concurrents = ~4 ``pappers_call_ok``
+    en burst au lieu des ~2 attendus par cold-start.
+
+    Fix : early-set du flag ``_PREWARM_DONE = True`` AVANT le 1er
+    ``await``, exploitant ``asyncio`` cooperative scheduling pour que
+    toutes les coroutines parallèles voient le flag à True et early-
+    return.
+
+    Ce test reproduit le scenario : 8 invocations concurrentes via
+    ``asyncio.gather``. Le caller doit observer **exactement 4 calls**
+    (1 prewarm complet, pas 2× ou 3×)."""
+    mcp_pappers._reset_prewarm_state_for_tests()
+    calls: list[str] = []
+
+    async def _fake(_name: str, args: dict[str, Any]) -> dict[str, Any]:
+        # ``await`` artificiel pour donner un point de suspension :
+        # simule la latence d'un vrai call MCP, et permet au scheduler
+        # async de yielder vers d'autres coroutines.
+        await asyncio.sleep(0)
+        calls.append(args["company_name"])
+        return {"isError": False, "content": []}
+
+    # 8 invocations concurrentes — sans early-set du flag, on
+    # observerait 16-32 calls au lieu de 4.
+    await asyncio.gather(*(mcp_pappers.prewarm_cache(call=_fake) for _ in range(8)))
+
+    assert len(calls) == 4, (
+        f"Race condition détectée : {len(calls)} calls au lieu de 4 attendus. "
+        "Vérifier que ``_PREWARM_DONE = True`` est posé AVANT le 1er ``await``."
+    )
+
+
 # ── _is_degraded memoization (review C4) ─────────────────────────────
 
 
