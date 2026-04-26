@@ -26,6 +26,8 @@ import json
 import re
 from dataclasses import dataclass, field
 
+from genial_agent.guardrails.sirens import valid_siren
+
 SIREN_RE = re.compile(r"\b(\d{9})\b")
 # Champs Pappers connus pour porter le nom et le SIREN d'une entité.
 NAME_KEYS: tuple[str, ...] = (
@@ -93,7 +95,11 @@ def _scan_dict_for_entity(d: dict) -> ActiveEntity | None:
         v = d.get(key)
         if isinstance(v, str):
             cleaned = v.replace(" ", "")
-            if SIREN_RE.fullmatch(cleaned):
+            # S09.7 hotfix : on impose la clef Luhn même quand le SIREN
+            # vient d'un champ explicite ``siren`` du payload — défense
+            # en profondeur contre un payload exotique ou un futur tool
+            # qui exposerait un identifiant interne sous le même nom.
+            if SIREN_RE.fullmatch(cleaned) and valid_siren(cleaned):
                 siren = cleaned
                 break
     if name and siren:
@@ -141,11 +147,16 @@ def extract_active_entity(tracker: TurnTracker) -> ActiveEntity | None:
                     break
 
     # Priorité 3 : SIREN brut dans n'importe quel preview text + nom orphan.
+    # S09.7 hotfix : check Luhn obligatoire — sinon on capture des
+    # entiers 9-chiffres collés dans un JSON (ex: ``"resultat":-453301347``
+    # → 453301347 matche \\b\\d{9}\\b mais n'est pas un SIREN). Bug
+    # observé live U3 (bannière "SIREN 453301347" qui était en fait
+    # le résultat net Carrefour Hyper 2023).
     if last_name:
         for preview in reversed(tracker.tool_result_previews):
-            m = SIREN_RE.search(preview)
-            if m:
-                return ActiveEntity(name=last_name, siren=m.group(1))
+            for candidate in SIREN_RE.findall(preview):
+                if valid_siren(candidate):
+                    return ActiveEntity(name=last_name, siren=candidate)
 
     return None
 
