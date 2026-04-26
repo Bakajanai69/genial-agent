@@ -34,27 +34,52 @@ _PAPPERS_LIKE_PAYLOAD = json.dumps(
 )
 
 
-def test_walker_wildcard_returns_array_of_matches() -> None:
-    """``$.resultats[*].siren`` → array des 3 SIRENs (cas G2)."""
+def test_walker_wildcard_returns_envelope_for_scalar_extraction() -> None:
+    """``$.resultats[*].siren`` → enveloppe dict avec les 3 SIRENs +
+    sample des autres champs disponibles (S09.7 amélioration 2).
+
+    L'agent voit qu'il existe ``nom_entreprise`` et ``role`` à côté du
+    siren, sans avoir à re-faire un inspect — encourage l'extraction
+    multi-champs au tour suivant."""
     out = inspect(_PAPPERS_LIKE_PAYLOAD, "$.resultats[*].siren")
     parsed = json.loads(out)
-    assert isinstance(parsed, list)
-    assert set(parsed) == {"775670417", "552032534", "775670418"}
+    assert isinstance(parsed, dict)
+    assert set(parsed["_extracted_values"]) == {"775670417", "552032534", "775670418"}
+    assert parsed["_count"] == 3
+    # L'agent voit qu'il existe d'autres champs frères
+    assert "_other_fields_available" in parsed
+    assert "nom_entreprise" in parsed["_other_fields_available"]
+    assert "role" in parsed["_other_fields_available"]
 
 
 def test_walker_wildcard_array_value_extraction() -> None:
-    """``$.comptes[*].annee`` → array des 3 années (cas G3-style)."""
+    """``$.comptes[*].annee`` → enveloppe avec les 3 années en scalaires."""
     out = inspect(_PAPPERS_LIKE_PAYLOAD, "$.comptes[*].annee")
     parsed = json.loads(out)
-    assert sorted(parsed) == [2022, 2023, 2024]
+    assert isinstance(parsed, dict)
+    assert sorted(parsed["_extracted_values"]) == [2022, 2023, 2024]
 
 
 def test_walker_recursive_descent() -> None:
-    """``$..siren`` retourne tous les SIREN du payload, peu importe la profondeur."""
+    """``$..siren`` retourne tous les SIRENs trouvés, peu importe la
+    profondeur. Format dépend du type de match : enveloppe si scalaires,
+    list directe si dicts/list."""
     out = inspect(_PAPPERS_LIKE_PAYLOAD, "$..siren")
     parsed = json.loads(out)
+    # Les `siren` du payload sont des scalaires → enveloppe
+    values = set(parsed["_extracted_values"]) if isinstance(parsed, dict) else set(parsed)
+    assert values >= {"775670417", "552032534", "775670418"}
+
+
+def test_walker_wildcard_returns_full_items_when_no_terminal_field() -> None:
+    """``$.resultats[*]`` (sans ``.field`` terminal) → array brut des
+    items dict, pas d'enveloppe (l'agent voit déjà toute la struct)."""
+    out = inspect(_PAPPERS_LIKE_PAYLOAD, "$.resultats[*]")
+    parsed = json.loads(out)
     assert isinstance(parsed, list)
-    assert set(parsed) >= {"775670417", "552032534", "775670418"}
+    assert len(parsed) == 3
+    assert all(isinstance(item, dict) for item in parsed)
+    assert {item["siren"] for item in parsed} == {"775670417", "552032534", "775670418"}
 
 
 def test_walker_simple_path_not_delegated() -> None:

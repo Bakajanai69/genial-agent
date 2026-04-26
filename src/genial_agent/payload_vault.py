@@ -211,14 +211,84 @@ def inspect(raw_json: str, json_path: str, max_chars: int = LOOKUP_MAX_CHARS_DEF
     Tronqué à ``max_chars`` avec marker explicite si nécessaire. La
     valeur est **verbatim** (pas de reformulation), garantie par
     ``json.dumps`` sur le ``json.loads`` du payload.
+
+    S09.7 amélioration 3 : si le path final accède à un index ``[N]``
+    d'une list et qu'il y a > 0 items restants après cet index, on
+    ajoute un footer signalétique `_meta: N more siblings` + hint
+    `use [*] for all`. Aide l'agent à savoir qu'il n'a vu qu'un seul
+    item d'une liste plus longue (anti-pattern G2 où l'agent ne va
+    pas chercher plus loin que ``resultats[0]`` et ``resultats[2]``).
     """
     capped = max(0, min(int(max_chars), LOOKUP_MAX_CHARS_HARD))
     parsed = _safe_parse_json(raw_json)
     value = _walk(parsed, json_path)
     encoded = json.dumps(value, ensure_ascii=False, indent=2)
+
+    # Footer signalétique : remaining siblings sur index terminal.
+    footer = _remaining_siblings_footer(parsed, json_path)
+    if footer:
+        encoded = encoded + footer
+
     if len(encoded) > capped:
         return encoded[:capped] + "\n…[lookup truncated]"
     return encoded
+
+
+def _remaining_siblings_footer(parsed: Any, json_path: str) -> str:
+    """Calcule le footer ``_meta: N more siblings`` quand le path
+    final accède à un index ``[N]`` ou un segment numérique sur une
+    list, et qu'il y a plus d'items après.
+
+    Retourne `""` si pas applicable (path non-terminal-index, parent
+    introuvable, hors range). Best-effort : silencieusement vide en
+    cas de path complexe (wildcard, recursive descent) — déjà couvert
+    par l'amélioration 2.
+    """
+    if not isinstance(json_path, str):
+        return ""
+    # Skip les paths à wildcard (couverts par amélioration 2).
+    if any(tok in json_path for tok in _JSONPATH_WILDCARD_TOKENS):
+        return ""
+    cleaned = json_path.lstrip("$").lstrip(".")
+    if not cleaned:
+        return ""
+    segments = [m.group(1) or m.group(2) for m in _PATH_SEGMENT.finditer(cleaned)]
+    if not segments:
+        return ""
+    last = segments[-1]
+    last_clean = last.rstrip(DIGIT_STRING_KEY_MARKER) if isinstance(last, str) else last
+    if not isinstance(last_clean, str) or not last_clean.lstrip("-").isdigit():
+        return ""
+
+    # Re-walk au parent (path moins le dernier segment) pour mesurer
+    # la taille de la liste source.
+    parent_segments = segments[:-1]
+    parent_path = "$"
+    if parent_segments:
+        # Reconstruire un path canonique. Les indices numériques
+        # peuvent être encodés ``[N]`` ou ``.N`` indifféremment côté
+        # walker — on choisit ``.N`` pour la simplicité.
+        parent_path = "$." + ".".join(str(s) for s in parent_segments)
+    parent = _walk_simple(parsed, parent_path)
+    if not isinstance(parent, list):
+        return ""
+    try:
+        idx = int(last_clean)
+    except ValueError:
+        return ""
+    if idx < 0:
+        idx += len(parent)
+    if idx < 0 or idx >= len(parent):
+        return ""
+    remaining = len(parent) - idx - 1
+    if remaining <= 0:
+        return ""
+    parent_path_clean = parent_path.lstrip("$").lstrip(".") or "<root>"
+    return (
+        f"\n…[_meta: {remaining} more siblings at this index "
+        f"(use '$.{parent_path_clean}[*]' for all items, or "
+        f"'$.{parent_path_clean}[N]' with N up to {len(parent) - 1})]"
+    )
 
 
 def search(
@@ -476,7 +546,15 @@ def _walk_with_jsonpath_ng(node: Any, path: str) -> Any:
 
     - la valeur unique si ``len(matches) == 1`` (plus ergonomique pour le
       LLM — pas de confusion list-vs-scalar),
-    - la liste de valeurs si ``len(matches) >= 2``,
+    - **enveloppe dict** ``{"_extracted_values": [...], "_count": N,
+      "_other_fields_available": [...]}`` quand le wildcard renvoie un
+      array de **scalaires** depuis un parent dict (S09.7 amélioration 2).
+      Encourage l'agent à voir les autres champs disponibles sur chaque
+      item — règle l'anti-pattern où l'agent extrait un seul champ via
+      ``$.items[*].field_unique`` et perd les champs frères.
+    - la liste de valeurs si ``len(matches) >= 2`` et qu'au moins un
+      match est un dict/list (l'agent a déjà la struct sous les yeux,
+      pas besoin d'enveloppe).
     - ``{"_error": ...}`` si parse error / 0 match.
 
     Lazy import : on évite +50 ms de startup pour les sessions qui
@@ -488,9 +566,51 @@ def _walk_with_jsonpath_ng(node: Any, path: str) -> Any:
         expr = parse(path)
     except Exception as exc:  # noqa: BLE001 — parse error LLM, on remonte propre
         return {"_error": f"invalid jsonpath '{path}': {exc}"}
-    matches = [m.value for m in expr.find(node)]
-    if not matches:
+    found = expr.find(node)
+    if not found:
         return {"_error": f"no match for '{path}' in payload"}
-    if len(matches) == 1:
-        return matches[0]
-    return matches
+    values = [m.value for m in found]
+    if len(values) == 1:
+        return values[0]
+
+    # S09.7 amélioration 2 : si tous les matches sont des scalaires
+    # (string/int/etc.) ET qu'ils proviennent d'un parent dict, on
+    # enveloppe avec les **autres clés disponibles** sur ce parent. Le
+    # LLM voit qu'il existe des champs frères et peut re-query sans le
+    # ``.field`` terminal pour récupérer les items complets.
+    if all(not isinstance(v, dict | list) for v in values):
+        sample_keys = _extract_sibling_keys(found)
+        if sample_keys:
+            return {
+                "_extracted_values": values,
+                "_count": len(values),
+                "_other_fields_available": sample_keys,
+                "_hint": (
+                    f"Extracted {len(values)} scalar values from '{path}'. "
+                    f"Each item also has these fields: {sample_keys}. "
+                    f"Re-query without the trailing '.field' to get full "
+                    f"items, or chain another wildcard for a different field."
+                ),
+            }
+    return values
+
+
+def _extract_sibling_keys(found: list[Any]) -> list[str]:
+    """Trouve les clés du parent dict du 1er match jsonpath-ng.
+
+    Utilisé par l'amélioration 2 pour signaler à l'agent les autres
+    champs disponibles quand il extrait un seul scalaire via wildcard.
+    Best-effort : si le parent n'est pas accessible (root match,
+    structure exotique), retourne ``[]`` et le retour reste un array
+    simple sans enveloppe.
+    """
+    try:
+        first_ctx = found[0].context  # DatumInContext parent
+        if first_ctx is None:
+            return []
+        parent_value = first_ctx.value
+        if not isinstance(parent_value, dict):
+            return []
+        return [str(k) for k in list(parent_value.keys())[:SKELETON_SAMPLE_KEYS_LIMIT]]
+    except (AttributeError, IndexError):
+        return []

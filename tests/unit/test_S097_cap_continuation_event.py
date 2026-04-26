@@ -103,3 +103,20 @@ def test_continuation_event_supported_reason_codes(reason_code: str) -> None:
     from genial_agent.guardrails.pipeline import CONTINUATION_REASON_CODES
 
     assert reason_code in CONTINUATION_REASON_CODES
+
+
+# ---- S09.7 amélioration 1 : auto-continuation backend ----
+
+
+def test_auto_continuation_only_for_local_lookups() -> None:
+    """Sanity : seul ``cap_local_lookups_per_turn`` (compute pur, zéro
+    coût €) déclenche l'auto-continuation backend. Les caps "argent"
+    (token_budget, tool_calls, wall_clock) restent dead-end côté
+    backend — l'utilisateur reste souverain via le bouton UI."""
+    from genial_agent.guardrails.pipeline import AUTO_CONTINUATION_REASON_CODES
+
+    assert frozenset({"cap_local_lookups_per_turn"}) == AUTO_CONTINUATION_REASON_CODES
+    # Caps monétaires NON auto-continués
+    assert "cap_token_budget" not in AUTO_CONTINUATION_REASON_CODES
+    assert "cap_tool_calls_per_turn" not in AUTO_CONTINUATION_REASON_CODES
+    assert "cap_wall_clock" not in AUTO_CONTINUATION_REASON_CODES

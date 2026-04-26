@@ -83,6 +83,18 @@ CONTINUATION_REASON_CODES = frozenset(
     }
 )
 
+# S09.7 amélioration 1 — auto-continuation backend sur les caps
+# **compute pur** (zéro coût €). Quand un de ces reason_codes
+# firefires sans que l'agent ait conclu, le pipeline relance
+# automatiquement un nouveau ``run_routed_turn`` avec un message
+# neutre, état préservé. Limité à 1 retry par turn user (évite la
+# boucle infinie). Les caps "argent" (token_budget, tool_calls,
+# wall_clock) restent dead-end côté backend — l'utilisateur reste
+# souverain via le bouton UI ``cap_continuation_proposed``.
+AUTO_CONTINUATION_REASON_CODES = frozenset({"cap_local_lookups_per_turn"})
+
+_AUTO_CONTINUATION_PROMPT = "Continue depuis où tu t'es arrêté."
+
 
 def _continuation_event(capped_event: dict[str, Any], session_id: str) -> dict[str, Any]:
     """Construit l'event ``cap_continuation_proposed`` à partir d'un
@@ -160,10 +172,18 @@ async def run_guarded_turn(
         yield _continuation_event(capped_event, session_id)
         return
 
-    # --- Run routed turn avec observation budget + collect sirens ---
+    # --- Run routed turn(s) avec observation budget + collect sirens ---
     text_chunks: list[str] = []
     allowed_sirens: set[str] = set()
     budget_emitted = False
+
+    # S09.7 amélioration 1 : auto-continuation backend sur cap_local_lookups.
+    # Le pipeline traite une **queue** de messages utilisateur. La queue
+    # part avec le message original ; si un cap zero-coût firefires sans
+    # conclusion, on enqueue un message de continuation neutre.
+    # ``auto_continued_once`` borne à 1 retry par turn user (évite boucle).
+    turn_inputs: list[str] = [user_message]
+    auto_continued_once = False
 
     # PEP 789 — un async generator imbriqué doit être explicitement
     # ``aclose()``-é dans un ``try/finally`` quand on l'itère depuis un
@@ -174,89 +194,110 @@ async def run_guarded_turn(
     # I5 S03) ou des connexions Anthropic encore ouvertes. Cohérent
     # avec le pattern S04 ``run_routed_turn`` qui fait de même sur son
     # inner ``run_turn``.
-    routed = run_routed_turn(state, user_message)
-    try:
-        async for event in routed:
-            # Forward tel quel (superset, pas de mutation).
-            yield event
+    while turn_inputs:
+        current_message = turn_inputs.pop(0)
+        routed = run_routed_turn(state, current_message)
+        try:
+            async for event in routed:
+                # Forward tel quel (superset, pas de mutation).
+                yield event
 
-            etype = event.get("type")
+                etype = event.get("type")
 
-            # S09.7 Axe 3 C4 — cap-as-UX-event. Pour CHAQUE event
-            # ``capped`` émis (par run_routed_turn ou par nous), on
-            # émet un ``cap_continuation_proposed`` pour que la UI
-            # propose Continuer / Synthèse partielle.
-            if etype == "capped":
-                rc = event.get("reason_code")
-                if rc in CONTINUATION_REASON_CODES:
-                    yield _continuation_event(event, session_id)
+                # S09.7 Axe 3 C4 — cap-as-UX-event. Pour CHAQUE event
+                # ``capped`` émis (par run_routed_turn ou par nous), on
+                # émet un ``cap_continuation_proposed`` pour que la UI
+                # propose Continuer / Synthèse partielle.
+                if etype == "capped":
+                    rc = event.get("reason_code")
+                    if rc in CONTINUATION_REASON_CODES:
+                        yield _continuation_event(event, session_id)
+                    # S09.7 amélioration 1 : auto-continuation
+                    # backend sur cap_local_lookups (compute pur).
+                    # 1 retry max par turn user. Le message neutre
+                    # ``"Continue..."`` ne dicte aucune stratégie —
+                    # l'agent décide ce qu'il fait avec son state +
+                    # vault préservés.
+                    if rc in AUTO_CONTINUATION_REASON_CODES and not auto_continued_once:
+                        auto_continued_once = True
+                        turn_inputs.append(_AUTO_CONTINUATION_PROMPT)
+                        yield {
+                            "type": "auto_continuation_started",
+                            "reason_code": rc,
+                            "session_id": session_id,
+                        }
+                        logger.info(
+                            "pipeline_auto_continuation_started",
+                            reason_code=rc,
+                            session_id=session_id,
+                        )
 
-            if etype == "text":
-                text_chunks.append(event.get("content", ""))
-            elif etype == "llm_meta":
-                in_tok = int(event.get("input_tokens") or 0)
-                out_tok = int(event.get("output_tokens") or 0)
-                await budget.add(session_id, in_tok, out_tok)
-                # S07 (B1 fix) — ``llm_meta`` est émis **par appel
-                # Claude** (chaque itération de ``agent.run_turn``, plus
-                # une 2ᵉ série en cas d'escalade Haiku→Sonnet). Le
-                # pipeline incrémente donc ``total_llm_calls`` (compteur
-                # bas niveau, utile au debug latence/coût) ; le compteur
-                # ``total_turns`` (1 par tour utilisateur) est porté par
-                # ``app.py:on_message`` qui voit lui le périmètre
-                # message-utilisateur. Bind contextvar du ``request_id``
-                # par-appel : chaque ``bind_contextvars`` écrase le
-                # précédent, c'est attendu (request_id par-appel).
-                #
-                # S09.7 — agrégation des compteurs prompt caching
-                # (cache_creation, cache_read). Cible mesurable :
-                # cache_read_tokens / input_tokens > 50 % à partir du
-                # 2ème round (cf. story §"Mesure prompt caching").
-                cache_creation = int(event.get("cache_creation_tokens") or 0)
-                cache_read = int(event.get("cache_read_tokens") or 0)
-                stats_incr(
-                    total_llm_calls=1,
-                    anthropic_input_tokens=in_tok,
-                    anthropic_output_tokens=out_tok,
-                    anthropic_cache_creation_tokens=cache_creation,
-                    anthropic_cache_read_tokens=cache_read,
-                )
-                request_id = event.get("request_id")
-                if request_id:
-                    structlog.contextvars.bind_contextvars(request_id=request_id)
-                if not budget_emitted and await budget.exhausted(session_id):
-                    budget_emitted = True
-                    capped_inflight = {
-                        "type": "capped",
-                        "reason_code": REASON_CODE_CAP_TOKEN_BUDGET,
-                        "reason": f"{budget.cap} tokens/session",
-                    }
-                    yield capped_inflight
-                    # S09.7 Axe 3 C4 — pendant qu'on est encore dans
-                    # la boucle ``run_routed_turn``, on émet aussi le
-                    # ``cap_continuation_proposed``. La boucle finit
-                    # son itération en cours (S04 ne ``break`` pas sur
-                    # ce capped) puis l'event ``end`` clôture proprement.
-                    yield _continuation_event(capped_inflight, session_id)
-            elif etype == "tool_result":
-                # Collecte des SIREN Luhn-valides dans les tool_results pour
-                # ``allowed_sirens`` du validator. ``content_preview`` est
-                # tronqué à 200 chars (contrat S03) — suffisant dans 99 %
-                # des cas car les SIREN Pappers sont en tête de payload
-                # (``{"siren": "...", ...}``). Cf. annexe B de la story.
-                preview = event.get("content_preview") or ""
-                allowed_sirens |= extract_sirens(preview, luhn_only=True)
-            elif etype == "payload_offloaded":
-                # S09.5 — un payload MCP volumineux a été rangé dans le
-                # vault session. L'event est forwarded inchangé pour la
-                # UI (steps view S06) ; on incrémente le compteur S07.
-                stats_incr(payloads_offloaded_total=1)
-            elif etype == "payload_inspected":
-                stats_incr(payload_inspects_total=1)
-            elif etype == "payload_searched":
-                stats_incr(payload_searches_total=1)
-    finally:
-        await routed.aclose()
+                if etype == "text":
+                    text_chunks.append(event.get("content", ""))
+                elif etype == "llm_meta":
+                    in_tok = int(event.get("input_tokens") or 0)
+                    out_tok = int(event.get("output_tokens") or 0)
+                    await budget.add(session_id, in_tok, out_tok)
+                    # S07 (B1 fix) — ``llm_meta`` est émis **par appel
+                    # Claude** (chaque itération de ``agent.run_turn``, plus
+                    # une 2ᵉ série en cas d'escalade Haiku→Sonnet). Le
+                    # pipeline incrémente donc ``total_llm_calls`` (compteur
+                    # bas niveau, utile au debug latence/coût) ; le compteur
+                    # ``total_turns`` (1 par tour utilisateur) est porté par
+                    # ``app.py:on_message`` qui voit lui le périmètre
+                    # message-utilisateur. Bind contextvar du ``request_id``
+                    # par-appel : chaque ``bind_contextvars`` écrase le
+                    # précédent, c'est attendu (request_id par-appel).
+                    #
+                    # S09.7 — agrégation des compteurs prompt caching
+                    # (cache_creation, cache_read). Cible mesurable :
+                    # cache_read_tokens / input_tokens > 50 % à partir du
+                    # 2ème round (cf. story §"Mesure prompt caching").
+                    cache_creation = int(event.get("cache_creation_tokens") or 0)
+                    cache_read = int(event.get("cache_read_tokens") or 0)
+                    stats_incr(
+                        total_llm_calls=1,
+                        anthropic_input_tokens=in_tok,
+                        anthropic_output_tokens=out_tok,
+                        anthropic_cache_creation_tokens=cache_creation,
+                        anthropic_cache_read_tokens=cache_read,
+                    )
+                    request_id = event.get("request_id")
+                    if request_id:
+                        structlog.contextvars.bind_contextvars(request_id=request_id)
+                    if not budget_emitted and await budget.exhausted(session_id):
+                        budget_emitted = True
+                        capped_inflight = {
+                            "type": "capped",
+                            "reason_code": REASON_CODE_CAP_TOKEN_BUDGET,
+                            "reason": f"{budget.cap} tokens/session",
+                        }
+                        yield capped_inflight
+                        # S09.7 Axe 3 C4 — pendant qu'on est encore dans
+                        # la boucle ``run_routed_turn``, on émet aussi le
+                        # ``cap_continuation_proposed``. La boucle finit
+                        # son itération en cours (S04 ne ``break`` pas sur
+                        # ce capped) puis l'event ``end`` clôture proprement.
+                        yield _continuation_event(capped_inflight, session_id)
+                elif etype == "tool_result":
+                    # Collecte des SIREN Luhn-valides dans les tool_results pour
+                    # ``allowed_sirens`` du validator. ``content_preview`` est
+                    # tronqué à 200 chars (contrat S03) — suffisant dans 99 %
+                    # des cas car les SIREN Pappers sont en tête de payload
+                    # (``{"siren": "...", ...}``). Cf. annexe B de la story.
+                    preview = event.get("content_preview") or ""
+                    allowed_sirens |= extract_sirens(preview, luhn_only=True)
+                elif etype == "payload_offloaded":
+                    # S09.5 — un payload MCP volumineux a été rangé dans le
+                    # vault session. L'event est forwarded inchangé pour la
+                    # UI (steps view S06) ; on incrémente le compteur S07.
+                    stats_incr(payloads_offloaded_total=1)
+                elif etype == "payload_inspected":
+                    stats_incr(payload_inspects_total=1)
+                elif etype == "payload_searched":
+                    stats_incr(payload_searches_total=1)
+        finally:
+            await routed.aclose()
 
     # --- C5 Output validator ---
     final_text = "".join(text_chunks)
