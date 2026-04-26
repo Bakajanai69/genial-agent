@@ -315,18 +315,10 @@ async def on_message(message: cl.Message) -> None:
         if turn_state.input_rejected:
             return
 
-        # S09.7 UI — distinction réflexion vs réponse finale.
-        # Reformate le contenu du msg pour wrapper les sections de
-        # raisonnement intermédiaire ("Je vais rechercher...") en
-        # blockquote *italique* discret, et garder la réponse finale
-        # en texte normal. No-op si pas de chaînage tool ou si le
-        # validator a déjà override.
-        from genial_agent.ui.events import format_msg_with_reasoning_sections
-
-        reformatted = format_msg_with_reasoning_sections(turn_state)
-        if reformatted is not None:
-            msg.content = reformatted
-            await msg.update()
+        # S09.7 UI : le rewrappage réflexion/réponse est désormais
+        # appliqué dans le dispatch de l'event ``routing_done`` (cf.
+        # ``ui/events.py``), avant que validator_degraded ou linkify
+        # ne touchent au msg. Pas de post-processing ici.
 
         # Final pass linkify SIREN. ``linkify_applied`` est posé par le
         # dispatcher si ``validator_degraded`` a tourné (déjà linkifié) ;

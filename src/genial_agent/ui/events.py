@@ -240,6 +240,29 @@ async def dispatch_event(event: dict[str, Any], state: TurnState) -> None:
         state.model_used = event.get("model_used", state.model_used)
         state.escalated = bool(event.get("escalated", state.escalated))
         state.escalation_mode = event.get("escalation_mode", state.escalation_mode)
+
+        # S09.7 UI — rewrappage réflexion vs réponse finale APRÈS le
+        # streaming complet (routing_done arrive après le dernier text
+        # final), AVANT que validator_degraded ou linkify ne touchent
+        # au msg.content. À ce point :
+        # - state.text_sections contient les raisonnements intermédiaires
+        # - state.current_text_buffer contient la réponse finale
+        reformatted = _format_msg_with_reasoning_sections(state)
+        if reformatted is not None:
+            logger.info(
+                "ui_reasoning_rewrap_applied",
+                sections_count=len(state.text_sections),
+                final_chars=len(state.current_text_buffer),
+            )
+            state.msg.content = reformatted
+            await state.msg.update()
+        else:
+            logger.debug(
+                "ui_reasoning_rewrap_skipped",
+                sections_count=len(state.text_sections),
+                final_chars=len(state.current_text_buffer),
+                linkify_applied=state.linkify_applied,
+            )
         return
 
     if et == "end":
@@ -301,36 +324,29 @@ async def dispatch_event(event: dict[str, Any], state: TurnState) -> None:
     logger.debug("ui_event_unknown_ignored", event_type=et)
 
 
-def format_msg_with_reasoning_sections(state: TurnState) -> str | None:
+def _format_msg_with_reasoning_sections(state: TurnState) -> str | None:
     """Reformate ``state.msg.content`` pour distinguer visuellement
     les sections de raisonnement intermédiaire de la réponse finale.
 
-    Appelé par ``app.on_message`` après le drain du pipeline (avant
-    linkify et badge modèle). Retourne le nouveau contenu ou ``None``
-    si rien à réécrire.
+    Appelé sur l'event ``routing_done`` (juste après que le streaming
+    final est terminé, AVANT que validator_degraded ou linkify ne
+    touchent au msg).
 
     Logique S09.7 UI :
 
     - Pendant le streaming, on accumule chaque section de text dans
       ``state.text_sections`` (flush sur tool_use), et le buffer
       en cours dans ``state.current_text_buffer``.
-    - À la fin du turn, le buffer en cours = la **réponse finale**
+    - À ``routing_done``, le buffer en cours = la **réponse finale**
       (le dernier tour LLM a produit du text sans appeler de tool).
     - Toutes les sections précédentes = du **raisonnement
       intermédiaire** ("Je vais rechercher...") → wrap en *italique*
       discret pour qu'elles soient visuellement distinctes de la
       réponse principale.
-    - Si l'agent n'a pas chaîné de tool (réponse direct sans tool_use),
+    - Si l'agent n'a pas chaîné de tool (réponse directe sans tool_use),
       ``text_sections`` est vide → on retourne ``None`` (rien à
       reformater).
-
-    Sécurité : si ``state.msg.content`` a déjà été override par
-    ``validator_degraded`` (hallucination détectée), on ne touche pas
-    — le validator a la priorité.
     """
-    if state.linkify_applied:
-        # Validator a déjà override : on respecte sa version finale.
-        return None
     if not state.text_sections:
         # Pas de chaînage tool, rien à distinguer.
         return None
@@ -351,3 +367,7 @@ def format_msg_with_reasoning_sections(state: TurnState) -> str | None:
     # Pas de réponse finale (ex: cap firefired juste avant) → on
     # affiche au moins le raisonnement pour transparence.
     return formatted_reasoning
+
+
+# Alias public pour les tests qui importent l'ancien nom.
+format_msg_with_reasoning_sections = _format_msg_with_reasoning_sections

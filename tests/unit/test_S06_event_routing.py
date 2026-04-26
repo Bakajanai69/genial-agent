@@ -574,13 +574,20 @@ async def test_format_msg_returns_none_if_no_chaining() -> None:
     assert format_msg_with_reasoning_sections(state) is None
 
 
-async def test_format_msg_returns_none_if_validator_degraded() -> None:
-    """Si le validator a override (linkify_applied=True), on ne touche
-    pas au contenu — le validator a la priorité."""
+async def test_format_msg_applied_on_routing_done_before_validator() -> None:
+    """S09.7 hotfix : le rewrappage est désormais appliqué dans
+    ``dispatch_event(routing_done)`` AVANT que validator/linkify
+    ne touchent au msg. Ne dépend plus de ``linkify_applied`` (le
+    précédent retour None sur cette condition manquait son objectif :
+    le rewrappage devait s'appliquer dans tous les cas où il y a eu
+    chaînage de tools)."""
     from genial_agent.ui.events import format_msg_with_reasoning_sections
 
     state = TurnState(msg=_stub_msg())
     state.text_sections = ["raisonnement"]
     state.current_text_buffer = "réponse"
-    state.linkify_applied = True  # validator a déjà tourné
-    assert format_msg_with_reasoning_sections(state) is None
+    state.linkify_applied = True  # ne doit plus empêcher le rewrappage
+    result = format_msg_with_reasoning_sections(state)
+    assert result is not None
+    assert "> 💭 *raisonnement*" in result
+    assert "réponse" in result
