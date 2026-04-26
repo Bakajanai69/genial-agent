@@ -23,29 +23,56 @@
 //   [UI]
 //   custom_js = "/public/owner-cookie.js"
 (function () {
-    // S09.7 hotfix UX — anti-FOUC (Flash Of Unstyled Content) au tout
-    // 1er pageload. Le HTML Chainlit servi est minimal (juste
-    // ``<div id="root"></div>``) et le React app + le theme dark sont
-    // appliqués après le bundle JS chargé (~200-500 ms). Pendant ce
-    // délai, le navigateur affiche du blanc + le logo splash en grand
-    // → impression "page cassée" au tout 1er load. Ce JS est chargé
-    // avec ``defer`` donc s'exécute juste après le parsing HTML mais
-    // AVANT que React ne monte → on force le fond noir immédiatement.
-    // Au refresh suivant, les assets sont en cache navigateur et le
-    // flash n'est plus visible.
+    // S09.7 hotfix UX — anti-FOUC + anti-zigzag au tout 1er pageload.
+    //
+    // Symptômes observés sans ces protections :
+    //   1. Flash blanc bref avant que le theme dark Chainlit s'applique.
+    //   2. "Zigzag" visuel en navigation privée (pas de cache assets) :
+    //      la page se rend en plusieurs étapes — Chainlit réauthentifie
+    //      l'user quand il détecte un cookie changé entre la requête HTTP
+    //      initiale (sans cookie) et le WebSocket (avec cookie posé par
+    //      ce JS) → re-render multiple visible.
+    //
+    // Stratégie :
+    //   A. Forcer le fond noir immédiatement (anti-flash blanc).
+    //   B. Cacher le body en opacity:0 + fade-in lent → masque les
+    //      re-renders intermédiaires de Chainlit pendant ~600 ms.
+    //   C. Fallback timeout 2 s pour ne jamais laisser la page invisible
+    //      si quelque chose foire.
+
     try {
+        // A. Fond noir immédiat (avant React mount).
         document.documentElement.style.backgroundColor = "#0a0a0a";
-        if (document.body) {
-            document.body.style.backgroundColor = "#0a0a0a";
-        } else {
-            // body pas encore parsé : on attend DOMContentLoaded.
-            document.addEventListener("DOMContentLoaded", function () {
-                document.body.style.backgroundColor = "#0a0a0a";
-            });
+
+        // B. Inject un style inline qui hide le body avec fade-in.
+        //    Le custom CSS (footer.css) charge en parallèle du bundle
+        //    Chainlit, parfois trop tard pour le 1er paint. Inject
+        //    inline ici garantit que c'est appliqué AVANT le 1er paint.
+        const foucGuard = document.createElement("style");
+        foucGuard.id = "__genial_fouc_guard__";
+        foucGuard.textContent = `
+            html, body { background-color: #0a0a0a !important; }
+            body { opacity: 0; transition: opacity 0.45s ease-in; }
+            body.genial-revealed { opacity: 1; }
+        `;
+        if (document.head) {
+            document.head.appendChild(foucGuard);
         }
+
+        // C. Reveal stratégie : après ``load`` complet + 350 ms (laisse
+        //    Chainlit React monter et faire son premier render stable).
+        //    Fallback : 2 s max au cas où ``load`` ne fire jamais.
+        const reveal = function () {
+            if (document.body && !document.body.classList.contains("genial-revealed")) {
+                document.body.classList.add("genial-revealed");
+            }
+        };
+        window.addEventListener("load", function () {
+            setTimeout(reveal, 350);
+        });
+        setTimeout(reveal, 2000); // Fallback safety net
     } catch (e) {
-        // No-op : si le DOM n'est pas accessible (sandbox iframe extrême),
-        // l'utilisateur verra juste le flash habituel.
+        // No-op si DOM inaccessible (sandbox iframe extrême).
     }
 
     const KEY = "genial_owner_id";

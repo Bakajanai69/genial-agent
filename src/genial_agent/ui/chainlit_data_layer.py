@@ -309,8 +309,6 @@ class AnonymousSQLiteDataLayer(BaseDataLayer):
             logger.info(
                 "chainlit_data_layer_thread_access_denied",
                 thread_id=thread_id,
-                thread_owner_prefix=str(thread_owner)[:12] if thread_owner else None,
-                request_owner_prefix=owner[:12] if owner else None,
             )
             return None
 
@@ -436,12 +434,6 @@ class AnonymousSQLiteDataLayer(BaseDataLayer):
         # → match les threads pollués pré-fix v3 (créés avec
         # user_id="anonymous").
         owner = filters.userId or _resolve_owner_id()
-        logger.info(
-            "chainlit_data_layer_list_threads",
-            owner_prefix=str(owner)[:16],
-            from_filters=bool(filters.userId),
-        )
-
         sql = "SELECT * FROM threads WHERE user_id = ?"
         params: list[Any] = [owner]
         if filters.search:
