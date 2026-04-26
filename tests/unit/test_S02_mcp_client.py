@@ -401,6 +401,7 @@ async def test_prewarm_cache_calls_four_golden_seeds() -> None:
     ``{company_name, country_code}``. Casino ajouté pour aligner sur
     ``prewarm_comptes_entreprise.py`` et garantir 0 crédit live sur le
     starter "Compare Carrefour vs Casino"."""
+    mcp_pappers._reset_prewarm_state_for_tests()  # idempotence S09.7
     calls: list[tuple[str, dict[str, Any]]] = []
 
     async def _fake_call(name: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -420,6 +421,7 @@ async def test_prewarm_cache_calls_four_golden_seeds() -> None:
 async def test_prewarm_cache_swallows_per_seed_errors() -> None:
     """Review R1 : une exception sur un seed n'empêche pas les autres —
     le préchauffage est best-effort, pas bloquant au démarrage."""
+    mcp_pappers._reset_prewarm_state_for_tests()  # idempotence S09.7
     calls: list[str] = []
 
     async def _flaky(_name: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -431,6 +433,32 @@ async def test_prewarm_cache_swallows_per_seed_errors() -> None:
     # Doit terminer sans lever, et continuer après l'erreur sur BNP.
     await mcp_pappers.prewarm_cache(call=_flaky)
     assert calls == ["LVMH", "BNP Paribas", "Carrefour", "Casino Guichard"]
+
+
+async def test_prewarm_cache_is_idempotent_per_process() -> None:
+    """Review S09.7 — fix bug crédits parasites (capture 2026-04-26
+    20:22 local) : ``prewarm_cache()`` appelé 2× dans le même process
+    ne doit déclencher les appels qu'**une seule fois**. La 2ème
+    invocation est un no-op (cf. flag ``_PREWARM_DONE``). Sans ce fix,
+    chaque ``@cl.on_chat_start`` cramait jusqu'à 4 crédits Pappers."""
+    mcp_pappers._reset_prewarm_state_for_tests()
+    calls: list[str] = []
+
+    async def _fake(_name: str, args: dict[str, Any]) -> dict[str, Any]:
+        calls.append(args["company_name"])
+        return {"isError": False, "content": []}
+
+    await mcp_pappers.prewarm_cache(call=_fake)
+    assert len(calls) == 4
+
+    # 2ème appel — doit être un no-op sans toucher au caller.
+    await mcp_pappers.prewarm_cache(call=_fake)
+    assert len(calls) == 4, "prewarm_cache n'est pas idempotent process-level"
+
+    # 3ème appel avec ``force=True`` — bypass de l'idempotence pour les
+    # tests / scripts de setup explicites.
+    await mcp_pappers.prewarm_cache(call=_fake, force=True)
+    assert len(calls) == 8
 
 
 # ── _is_degraded memoization (review C4) ─────────────────────────────

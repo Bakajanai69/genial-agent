@@ -626,32 +626,63 @@ async def _execute_call_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+# Review S09.7 — bug crédits Pappers parasites (capture utilisateur
+# 2026-04-26 20:22 local) : ``prewarm_cache()`` appelé dans
+# ``@cl.on_chat_start`` (chaque session Chainlit), donc multiplié par
+# N refresh / N onglets. Les seeds prewarm ne matchent que partiellement
+# le bake disque (BNP Paribas / Casino Guichard ont des entrées baked
+# sur des noms divergents → cache miss systématique → 2 calls live par
+# session). Avec 2 sessions parallèles, on observait 4 ``pappers_call_ok``
+# en burst à chaque refresh.
+#
+# Fix : idempotence **process-level**. Le prewarm tourne au plus 1×
+# par boot du process (worker Chainlit / container Railway), pas par
+# session. Acceptable car (a) le cache MCP est partagé process-wide
+# via ``mcp_cache.cache``, (b) les seeds sont fixes (pas user-driven),
+# (c) le coût bake-mismatch est borné à ~2 crédits/cold-start au lieu
+# de ~2 crédits/refresh.
+#
+# L'aligement seeds ↔ bake reste à corriger proprement (S09.8 : utiliser
+# le bake comme source de vérité ou refaire le bake avec les seeds
+# runtime).
+_PREWARM_DONE = False
+
+
 async def prewarm_cache(
     call: Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
+    *,
+    force: bool = False,
 ) -> None:
-    """Préchauffe le cache sur les 3 entités officielles (LVMH, BNP,
-    Carrefour) pour que le mode dégradé fonctionne même en sortie de
-    boot (cahier §5.4). Appelé une fois depuis ``cl.on_chat_start``
-    (S06) ou le script de setup.
+    """Préchauffe le cache sur les entités officielles (LVMH, BNP,
+    Carrefour, Casino) pour que le mode dégradé fonctionne même en
+    sortie de boot (cahier §5.4). Appelé une fois depuis
+    ``cl.on_chat_start`` (S06).
 
     Args:
         call: fonction d'appel à injecter (tests) ; défaut
             ``call_tool``. Le paramètre est uniquement là pour
             faciliter les tests unitaires — production utilise
             ``call_tool`` directement.
+        force: bypass de l'idempotence process-level. Utilisé par les
+            tests unitaires qui veulent observer plusieurs invocations
+            successives. **Ne jamais activer en prod**.
 
     Args ``sirenisateur`` validés contre le ``inputSchema`` réel du MCP
     Pappers (probe 2026-04-24) : required = ``country_code`` +
     ``company_name``.
 
-    On **ne tente pas** ``informations-entreprise`` ici : cet outil
-    Pappers est premium et renvoie "crédits insuffisants" sur les packs
-    API offerts (100 crédits). Pour le MVP, la fiche identité est
-    servie via ``recherche-entreprises`` (non-premium, vérifié live).
+    Idempotence process-level (review S09.7, fix bug crédits) : la
+    fonction est un no-op après le 1er appel réussi dans le process.
+    Cf. commentaire ``_PREWARM_DONE`` ci-dessus.
 
     Toute exception isolée est loggée et ignorée — le préchauffage est
     un best-effort, pas un bloquant de démarrage.
     """
+    global _PREWARM_DONE
+    if _PREWARM_DONE and not force:
+        logger.debug("pappers_prewarm_skipped_already_done")
+        return
+
     caller = call or call_tool
     # Review S09.6 P1-6 : Casino ajouté pour aligner avec les 4 entités
     # golden de prewarm_comptes_entreprise.py (LVMH, BNP, Carrefour,
@@ -670,6 +701,22 @@ async def prewarm_cache(
                 seed=name,
                 error_type=type(exc).__name__,
             )
+
+    # Marquer comme fait UNIQUEMENT après la boucle complète, même si
+    # certains seeds ont échoué : on n'est pas plus avancé en réessayant
+    # sur la prochaine session, et l'objectif (best-effort) est atteint.
+    _PREWARM_DONE = True
+    logger.info("pappers_prewarm_done", seeds_count=len(seeds))
+
+
+def _reset_prewarm_state_for_tests() -> None:
+    """Réinitialise le flag idempotence. **Tests uniquement**.
+
+    Permet de tester le comportement multi-invocation sans avoir à
+    redémarrer le process Python. À ne jamais appeler en prod.
+    """
+    global _PREWARM_DONE
+    _PREWARM_DONE = False
 
 
 async def healthcheck() -> dict[str, Any]:
