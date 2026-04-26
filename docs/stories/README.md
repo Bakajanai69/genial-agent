@@ -215,7 +215,7 @@ opérationnelles.
 | S08 | [Déploiement Railway](./S08-deployment.md) | ✅ approved | S01, S07 | S07 |
 | S09 | [Polish : README, EVALUATION, Loom](./S09-polish.md) | 🟡 en cours (dev done) | S04, S05, S06, S08 | — |
 | S09.5 | [Gestion robuste des payloads MCP volumineux](./S09.5-mcp-payload-handling.md) | 🟡 en cours (dev done + review fixes) | S09 (dogfooding) | — |
-| S09.6 | [Workaround tools MCP & cache crédits persistant (+ persistance conversations)](./S09.6-mcp-workaround-and-credit-cache.md) | ⬜ à faire | S09.5 (post-livraison) | — |
+| S09.6 | [Workaround tools MCP & cache crédits persistant (+ persistance conversations)](./S09.6-mcp-workaround-and-credit-cache.md) | 🟡 phase 1 raffinée (3 inputs en attente) | S09.5 (post-livraison) | — |
 | S09.7 | [Robustesse extraction MCP & UX des caps](./S09.7-extraction-robustness-and-cap-ux.md) | ⬜ à faire | S09.5, S09.6 | — |
 | S10 | [🎯 Stretch : brief vocal ElevenLabs](./S10-voice-brief.md) | ⬜ bloqué (gating) | S09 | — |
 
