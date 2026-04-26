@@ -64,6 +64,14 @@ class TurnState:
     end_reason: str | None = None
     input_rejected: bool = False
     linkify_applied: bool = False
+    # S09.7 UI — distinction réflexion vs réponse finale.
+    # ``text_sections`` accumule les sections de text streamées entre 2
+    # tool_use successifs. À la fin du turn, toutes les sections sauf
+    # la dernière (= réponse finale du dernier tour LLM avec
+    # stop_reason=end_turn) sont wrappées en *italique* discret pour
+    # signaler visuellement le raisonnement intermédiaire.
+    text_sections: list[str] = field(default_factory=list)
+    current_text_buffer: str = ""
 
 
 _END_HUMAN_TEXT: dict[str, str] = {
@@ -111,12 +119,24 @@ async def dispatch_event(event: dict[str, Any], state: TurnState) -> None:
         return
 
     if et == "text":
-        # Streaming brut, linkify final-pass via ``validator_degraded``
-        # ou via le ``app.on_message`` après le ``async for``.
-        await state.msg.stream_token(event.get("content", ""))
+        # Streaming brut → bubble principal (UX live preservée).
+        # En parallèle, on accumule dans ``current_text_buffer`` pour
+        # pouvoir post-process à la fin du turn (distinction réflexion
+        # vs réponse finale, cf. ``finalize_reasoning_format``).
+        chunk = event.get("content", "")
+        state.current_text_buffer += chunk
+        await state.msg.stream_token(chunk)
         return
 
     if et == "tool_use":
+        # S09.7 UI : un tool_use signale que le text streamé jusque-là
+        # était du raisonnement intermédiaire (pas la réponse finale).
+        # On flush le buffer dans ``text_sections`` pour traitement
+        # post-turn.
+        if state.current_text_buffer.strip():
+            state.text_sections.append(state.current_text_buffer)
+        state.current_text_buffer = ""
+
         tu_id = event.get("id", "")
         name = event.get("name", "tool")
         tu_input = event.get("input", {}) or {}
@@ -279,3 +299,55 @@ async def dispatch_event(event: dict[str, Any], state: TurnState) -> None:
     # Forward-compat : event inconnu → log debug + ignore. Évite que
     # S07/S10 cassent S06 quand de nouveaux events apparaîtront.
     logger.debug("ui_event_unknown_ignored", event_type=et)
+
+
+def format_msg_with_reasoning_sections(state: TurnState) -> str | None:
+    """Reformate ``state.msg.content`` pour distinguer visuellement
+    les sections de raisonnement intermédiaire de la réponse finale.
+
+    Appelé par ``app.on_message`` après le drain du pipeline (avant
+    linkify et badge modèle). Retourne le nouveau contenu ou ``None``
+    si rien à réécrire.
+
+    Logique S09.7 UI :
+
+    - Pendant le streaming, on accumule chaque section de text dans
+      ``state.text_sections`` (flush sur tool_use), et le buffer
+      en cours dans ``state.current_text_buffer``.
+    - À la fin du turn, le buffer en cours = la **réponse finale**
+      (le dernier tour LLM a produit du text sans appeler de tool).
+    - Toutes les sections précédentes = du **raisonnement
+      intermédiaire** ("Je vais rechercher...") → wrap en *italique*
+      discret pour qu'elles soient visuellement distinctes de la
+      réponse principale.
+    - Si l'agent n'a pas chaîné de tool (réponse direct sans tool_use),
+      ``text_sections`` est vide → on retourne ``None`` (rien à
+      reformater).
+
+    Sécurité : si ``state.msg.content`` a déjà été override par
+    ``validator_degraded`` (hallucination détectée), on ne touche pas
+    — le validator a la priorité.
+    """
+    if state.linkify_applied:
+        # Validator a déjà override : on respecte sa version finale.
+        return None
+    if not state.text_sections:
+        # Pas de chaînage tool, rien à distinguer.
+        return None
+
+    # Le buffer en cours contient la réponse finale (texte streamé
+    # après le dernier tool_use, jusqu'à end_turn).
+    final_response = state.current_text_buffer.strip()
+    # Sections précédentes = raisonnement.
+    reasoning_parts = [s.strip() for s in state.text_sections if s.strip()]
+
+    # Format : citation Markdown ``> 💭 ...`` en italique pour le
+    # raisonnement, séparée du final par un saut de ligne. Le ``> ``
+    # crée un encart visuel discret côté Chainlit (rendering
+    # blockquote standard).
+    formatted_reasoning = "\n\n".join(f"> 💭 *{section}*" for section in reasoning_parts)
+    if final_response:
+        return f"{formatted_reasoning}\n\n{final_response}"
+    # Pas de réponse finale (ex: cap firefired juste avant) → on
+    # affiche au moins le raisonnement pour transparence.
+    return formatted_reasoning

@@ -502,3 +502,85 @@ async def test_hallucination_detected_silent(state: TurnState) -> None:
         state,
     )
     state.msg.update.assert_not_called()
+
+
+# ── S09.7 UI : distinction réflexion vs réponse finale ───────────────
+
+
+async def test_text_buffer_accumulates_per_section(state: TurnState) -> None:
+    """Les chunks text sont accumulés dans ``current_text_buffer`` en
+    plus du streaming UI live."""
+    await dispatch_event({"type": "text", "content": "Je vais "}, state)
+    await dispatch_event({"type": "text", "content": "rechercher..."}, state)
+    assert state.current_text_buffer == "Je vais rechercher..."
+    # Le streaming live a bien eu lieu aussi.
+    assert state.msg.stream_token.call_count == 2
+
+
+async def test_tool_use_flushes_buffer_to_text_sections(
+    state: TurnState, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Un ``tool_use`` event flush le buffer courant dans
+    ``text_sections`` (= raisonnement intermédiaire)."""
+    fake_step_instance = MagicMock(name="cl.Step")
+    fake_step_instance.__aenter__ = AsyncMock(return_value=fake_step_instance)
+    fake_step_instance.__aexit__ = AsyncMock(return_value=None)
+    import genial_agent.ui.events as events_mod
+
+    monkeypatch.setattr(
+        events_mod.cl,
+        "Step",
+        MagicMock(return_value=fake_step_instance),
+    )
+
+    await dispatch_event({"type": "text", "content": "Je vais rechercher LVMH"}, state)
+    await dispatch_event(
+        {"type": "tool_use", "id": "tu1", "name": "sirenisateur", "input": {}},
+        state,
+    )
+    assert state.text_sections == ["Je vais rechercher LVMH"]
+    assert state.current_text_buffer == ""
+
+
+async def test_format_msg_with_reasoning_sections() -> None:
+    """La fonction post-process wrappe les sections de raisonnement en
+    blockquote *italique* et garde la réponse finale en clair."""
+    from genial_agent.ui.events import format_msg_with_reasoning_sections
+
+    state = TurnState(msg=_stub_msg())
+    state.text_sections = [
+        "Je vais rechercher le SIREN de LVMH",
+        "Maintenant je vais récupérer les détails complets",
+    ]
+    state.current_text_buffer = "## Fiche LVMH\n- SIREN 775670417"
+
+    result = format_msg_with_reasoning_sections(state)
+    assert result is not None
+    assert "> 💭 *Je vais rechercher le SIREN de LVMH*" in result
+    assert "> 💭 *Maintenant je vais récupérer les détails complets*" in result
+    # La réponse finale reste en clair (pas wrappée)
+    assert "## Fiche LVMH\n- SIREN 775670417" in result
+    # La réponse finale arrive APRÈS les sections de raisonnement
+    assert result.index("Fiche LVMH") > result.index("Je vais rechercher")
+
+
+async def test_format_msg_returns_none_if_no_chaining() -> None:
+    """Si l'agent répond direct sans tool_use, ``text_sections`` est
+    vide → pas de reformatage."""
+    from genial_agent.ui.events import format_msg_with_reasoning_sections
+
+    state = TurnState(msg=_stub_msg())
+    state.current_text_buffer = "Réponse simple sans tool"
+    assert format_msg_with_reasoning_sections(state) is None
+
+
+async def test_format_msg_returns_none_if_validator_degraded() -> None:
+    """Si le validator a override (linkify_applied=True), on ne touche
+    pas au contenu — le validator a la priorité."""
+    from genial_agent.ui.events import format_msg_with_reasoning_sections
+
+    state = TurnState(msg=_stub_msg())
+    state.text_sections = ["raisonnement"]
+    state.current_text_buffer = "réponse"
+    state.linkify_applied = True  # validator a déjà tourné
+    assert format_msg_with_reasoning_sections(state) is None
