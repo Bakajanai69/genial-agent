@@ -176,6 +176,40 @@ chiffres financiers **headline** de l'entité.
   les comptes consolidés du groupe (LVMH SA = 651 M€ vs LVMH groupe
   consolidé ~84 Md€). À utiliser sur le SIREN ciblé approprié.
 
+### 4.2.2 Matrice tools fonctionnels (S09.6)
+
+Vue exécutable côté agent, consolidée à partir des probes
+[`probe_payg_compatibility.py`](../scripts/probe_payg_compatibility.py),
+[`probe_comptes_entreprise_alternatives.py`](../scripts/probe_comptes_entreprise_alternatives.py)
+et [`probe_tools_matrix.py`](../scripts/probe_tools_matrix.py)
+(probe S09.6 reproductible, ~6 crédits PAYG).
+
+| Tool | Args minimaux | Top-level keys typiques | Taille payload | Cas d'usage |
+|---|---|---|---:|---|
+| `sirenisateur` | `country_code, company_name` | `siren`, `denomination`, `siege` | ~250 chars | Trouve le SIREN d'une entité par nom (étape 1 systématique) |
+| `recherche-entreprises` | `q, par_page=1, return_fields=[chiffre_affaires, resultat, capital, effectif, annee_finances, annee_effectif]` | `entreprises[].chiffre_affaires`, `…resultat`, `…effectif`, `…annee_finances` | ~3 960 chars | **Headline financier 1 année** (workaround `comptes-entreprise` PAYG-KO) |
+| `comptes-entreprise` | `siren, annee=YYYY` | `bilans[].compte_resultat`, `…compte_resultat_detaille`, `…actif`, `…passif` | ~85 K chars | Bilans détaillés multi-années (peut renvoyer "crédits insuffisants" — bug §4.2) |
+| `cartographie-entreprise` | `siren` | `entreprise`, `filiales[]`, `mandataires[]`, `actionnaires[]` | jusqu'à 706 K chars | Filiales, groupe (offload via Vault) |
+| `recherche-dirigeants` | `q, par_page=5` | `resultats[]`, `resultats[].entreprises[]` | ~10-50 K chars | Mandats actifs d'un dirigeant |
+| `conformite-personne-physique` | `nom, prenom` | `nom`, `prenom`, `score_risque` | ~200 chars | KYC personne physique (gratuit) |
+
+**Lecture pour l'agent** (déjà reflétée dans le system prompt §"Carte
+des tools Pappers", `src/genial_agent/prompts.py`) :
+
+- **Si le SIREN est inconnu** → toujours `sirenisateur` en premier
+  (1 crédit, 250 chars, pas de risque).
+- **Si tu cherches le CA / résultat / effectif d'une seule année
+  récente** → `recherche-entreprises` avec `return_fields` financier
+  (1 crédit) — pas `comptes-entreprise`.
+- **Si tu cherches les bilans détaillés sur N années** → `comptes-entreprise`
+  par année (2 crédits/appel). Si crédits insuffisants, l'agent reçoit
+  un `tool_result` enrichi avec `workaround_hint` qui le dirige vers
+  `recherche-entreprises` ou un refus poli (cf. §4.2 + story S09.6).
+- **Si tu cherches une cartographie / filiales** → `cartographie-entreprise`
+  (3 crédits) puis offload Vault (`payload_inspect`/`payload_search`).
+- **Si tu cherches les mandats d'un dirigeant** → `recherche-dirigeants`
+  avec `par_page=5` (1-4 crédits, borné).
+
 ### 4.3 Workaround : cache disque persistant (S09.5 post-fix)
 
 Pour blinder une démo qui dépend de `comptes-entreprise` malgré le bug

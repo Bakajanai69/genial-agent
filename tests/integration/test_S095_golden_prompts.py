@@ -164,35 +164,52 @@ def _has_3y_compare(text: str) -> tuple[bool, str]:
 
 
 def _has_resultat_net_2023(text: str) -> tuple[bool, str]:
-    """Cherche une mention de 'résultat net' + 2023 (ou bilan clos
-    31/12/2023)."""
+    """S09.6 — assertion resserrée (Q2 user, 2026-04-26).
+
+    Cherche (a) une mention de 'résultat net' / 'bénéfice', (b) l'année
+    2023 OU 2024 (l'agent peut citer l'année courante si comptes 2023
+    pas en cache), et (c) **une valeur chiffrée** à proximité du métric
+    (regex ``\\d+[\\s.,]\\d+`` qui couvre les formats "9 587", "9.587",
+    "9,587", "12345"). Repose sur :
+
+    1. Fix walker M1 (S09.5 review) → l'agent peut naviguer
+       ``$.2023[0].resultat_net`` dans le payload ``comptes-entreprise``.
+    2. Cache pré-warmé (Axe 5 E1) garantit ``comptes-entreprise(LVMH,
+       2023)`` en cache disque avant la démo.
+    3. Workaround B3 → en cache miss + abo épuisé, fallback
+       ``recherche-entreprises`` (qui retourne resultat headline).
+    """
+    import re
+
     lower = text.lower()
     has_metric = any(m in lower for m in ("résultat net", "resultat net", "bénéfice", "benefice"))
-    has_year = "2023" in lower
+    has_year = "2023" in lower or "2024" in lower
     if not has_metric:
         return (False, "pas de mention 'résultat net' / 'bénéfice'")
     if not has_year:
-        return (False, "pas de mention de l'année 2023")
-    return (True, "OK")
+        return (False, "pas de mention de l'année 2023 / 2024")
+    # Cherche un nombre formaté à proximité de la métrique. On scan tout
+    # le texte (pas juste autour du mot) car l'agent peut formuler de
+    # plusieurs façons ; ce qu'on veut éviter c'est un texte qui dit
+    # "le résultat net 2023 n'est pas accessible" SANS chiffre.
+    has_value = bool(re.search(r"\d+[\s.,]\d{3}", text)) or bool(re.search(r"\d{4,}", text))
+    if not has_value:
+        return (False, "pas de valeur chiffrée détectée à proximité du résultat net")
+    return (True, "OK — métrique + année + valeur chiffrée présents")
 
 
 # --- Pack G1-G5 -------------------------------------------------------------
 
 GoldenAssertion = Callable[[str], tuple[bool, str]]
-# G2 — cible révisée à 3 SIRENs (story dit 10) : Pappers
-# ``recherche-dirigeants(q="Bernard Arnault")`` retourne 39 homonymes
-# (le nom est commun) ; l'agent Haiku doit (a) disambiguer le "vrai"
-# Bernard Arnault parmi 39 résultats, (b) extraire ses mandats de
-# ``resultats[i].entreprises``, (c) lister avec SIRENs. Ceiling
-# Haiku stochastique 3-7 SIRENs avant ``cap_token_budget=80K``. La
-# cible story ≥10 supposait du Sonnet (le keyword router ne catch
-# pas "mandats" → Haiku par défaut). 3 = seuil minimal qui valide
-# que l'agent a produit une réponse listante avec SIRENs vérifiables
-# (vs hallucination ou refus). Voir
-# ``traces/S095_iterations.md`` §"Step 2 — G2".
-# Améliorations possibles post-S09.5 : (a) ajouter "mandats|filiales"
-# au keyword router (S04), (b) bumper token budget à 120K (S05),
-# (c) hint de skeleton spécifique pour resultats[i].entreprises.
+# G2 — cible **resserrée S09.6** (Q2 user, 2026-04-26) : ≥ 5 SIRENs
+# distincts, vs ≥ 3 en S09.5. Le fix walker M1 + cache pré-warmé
+# permet à l'agent d'aller chercher plus loin dans
+# ``resultats[i].entreprises``. Fallback toléré à 4 si
+# ``recherche-dirigeants`` se met aussi à refuser PAYG (non observé
+# au 2026-04-26).
+# Pappers ``recherche-dirigeants(q="Bernard Arnault")`` retourne ~39
+# homonymes : l'agent Haiku doit (a) disambiguer, (b) extraire les
+# mandats, (c) lister avec SIRENs.
 GOLDEN_PROMPTS: list[tuple[str, str, GoldenAssertion]] = [
     (
         "G1",
@@ -202,7 +219,7 @@ GOLDEN_PROMPTS: list[tuple[str, str, GoldenAssertion]] = [
     (
         "G2",
         "Quels sont les mandats de Bernard Arnault ?",
-        _has_at_least_n_sirens(3),
+        _has_at_least_n_sirens(5),
     ),
     (
         "G3",

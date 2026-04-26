@@ -61,6 +61,31 @@ logger = structlog.get_logger(__name__)
 
 PAPPERS_BASE_URL = "https://mcp.pappers.fr"
 
+
+# S09.6 — Workaround tool-level pour le bug PAYG côté serveur Pappers
+# (cf. docs/pappers-mcp.md §4.2). Quand un tool listé ici lève
+# ``CreditsExhausted``, ``call_tool`` n'élève pas l'exception : il
+# retourne un ``tool_result`` synthétisé avec ``isError=True`` + un hint
+# que l'agent peut interpréter pour rebondir vers un tool alternatif.
+# Trade-off explicité dans la story §"Architecture phase 1 — Axe 2" :
+# l'agent garde la décision (le hint est une suggestion), mais reçoit
+# l'info nécessaire au rebond. Retrait facile (~15 lignes) le jour où
+# Pappers fixe le bug — cf. trigger S09.8 dans traces/S095_iterations.md.
+WORKAROUND_HINTS: dict[str, str] = {
+    "comptes-entreprise": (
+        "Le tool `comptes-entreprise` est temporairement indisponible "
+        "(crédits abo Pappers épuisés + bug PAYG côté serveur — "
+        "cf. docs/pappers-mcp.md §4.2). "
+        "Workaround : appelle `recherche-entreprises` avec "
+        '``siren=<siren>`` et ``return_fields=["chiffre_affaires", '
+        '"resultat", "capital", "effectif", "annee_finances", '
+        '"annee_effectif"]`` pour obtenir les chiffres headline de la '
+        "dernière année close. Pour des données multi-années détaillées, "
+        "refuse poliment et explique que cette donnée n'est pas accessible "
+        "en ce moment."
+    ),
+}
+
 # Budgets côté client. Le wall-clock total d'un ``call_tool`` (retry +
 # réseau + handshake) ne doit pas dépasser ``CALL_TOOL_BUDGET_S`` pour
 # respecter l'objectif UX < 6 s médian (cahier §4) tout en laissant une
@@ -402,6 +427,41 @@ def _reset_degraded_cache() -> None:
     _degraded_resolved = False
 
 
+def _build_workaround_tool_result(name: str, exc: CreditsExhausted) -> dict[str, Any] | None:
+    """S09.6 (B3) — Si ``name`` a un workaround documenté, retourne un
+    ``tool_result`` synthétique ``{isError, content[text]}`` qui contient
+    l'erreur originale + un hint exploitable par l'agent. Sinon ``None``.
+
+    Trade-off (cf. story §"Architecture phase 1 — Axe 2") : on
+    synthétise une réponse côté code mais on **ne substitue pas** l'appel.
+    L'agent garde la décision finale (le hint est suggestif, pas forcé).
+    Retrait facile (suppression de la clé dans ``WORKAROUND_HINTS``)
+    quand Pappers fixe le bug PAYG.
+    """
+    hint = WORKAROUND_HINTS.get(name)
+    if hint is None:
+        return None
+    logger.info(
+        "pappers_workaround_hint_emitted",
+        tool_name=name,
+        # Pas de scrubbing nécessaire : ``str(exc)`` contient le message
+        # Pappers public (pas de clé). Tronqué à 200 par sécurité.
+        original_error=str(exc)[:200],
+    )
+    return {
+        "isError": True,
+        "content": [
+            {
+                "type": "text",
+                "text": json.dumps(
+                    {"error": str(exc), "workaround_hint": hint},
+                    ensure_ascii=False,
+                ),
+            }
+        ],
+    }
+
+
 async def call_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
     """Exécute un tool Pappers avec cache 24 h + retry tenacity +
     single-flight sur cache miss concurrent (cf. review S02 C3).
@@ -420,11 +480,34 @@ async def call_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
        ``{"error": "..."}`` ou ``isError=True``) → **non cachée**,
        lève ``CreditsExhausted`` (si crédits) ou ``PappersToolError``.
     5. Sinon stocke dans le cache et retourne.
+
+    **S09.6 — Workaround crédits insuffisants (B3)** : si
+    ``CreditsExhausted`` est levé pour un tool listé dans
+    ``WORKAROUND_HINTS`` (étapes 2 ou 4 ci-dessus), l'exception est
+    interceptée et remplacée par un ``tool_result`` synthétique avec
+    ``isError=True`` + hint exploitable par l'agent. Pour les autres
+    tools, ``CreditsExhausted`` est propagé tel quel.
     """
     cached = await cache.get(name, args)
     if cached is not None:
         return cached
 
+    try:
+        return await _execute_call_tool(name, args)
+    except CreditsExhausted as exc:
+        # B3 : remplacer l'exception par un tool_result enrichi pour
+        # les tools avec workaround documenté. Couvre les deux chemins
+        # de raise CreditsExhausted : mode dégradé (cap journalier) et
+        # erreur métier Pappers ("crédits insuffisants" dans le payload).
+        synth = _build_workaround_tool_result(name, exc)
+        if synth is not None:
+            return synth
+        raise
+
+
+async def _execute_call_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
+    """Coeur métier de ``call_tool`` (extrait pour permettre l'enveloppe
+    workaround B3 sans imbrication massive de try/except)."""
     if _is_degraded():
         logger.warning("pappers_degraded_cache_miss", tool_name=name)
         raise CreditsExhausted(f"Cap crédits Pappers atteint, cache miss sur {name}")

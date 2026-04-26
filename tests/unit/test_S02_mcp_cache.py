@@ -285,8 +285,12 @@ async def test_cache_no_persist_path_means_in_memory_only() -> None:
     assert c._persist_path is None
 
 
-def test_default_ttl_is_seven_days() -> None:
-    """TTL par défaut bumpé de 24h à 7j (review S09.5 post-fix)."""
+def test_default_ttl_is_24h() -> None:
+    """TTL par défaut S09.6 : 24h pour les tools "live" (sirenisateur,
+    recherche-entreprises, recherche-dirigeants, conformite-…). Les tools
+    "snapshots" annuels (`comptes-entreprise`, `cartographie-entreprise`)
+    gardent 7j via ``TOOL_TTL_OVERRIDES``.
+    """
     from genial_agent.mcp_cache import DEFAULT_TTL_S
 
-    assert DEFAULT_TTL_S == 7 * 24 * 3600
+    assert DEFAULT_TTL_S == 24 * 3600

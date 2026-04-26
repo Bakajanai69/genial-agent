@@ -613,8 +613,16 @@ même de cliquer. Effet pédagogique sur le routing.
 Une ligne discrète en bas du chat :
 
 > *Données via Pappers · Modèles Claude (Anthropic) · Vos messages sont
-> traités aux US (Anthropic) et en France (Pappers). Pas de stockage
-> permanent. [Code source](lien-github)*
+> traités aux US (Anthropic) et en France (Pappers). L'historique de
+> votre session est conservé localement côté serveur (SQLite anonymisé,
+> redémarré à chaque mise à jour de l'application). Pas de partage
+> tiers, pas de cookie de tracking. [Code source](lien-github)*
+
+Le wording a évolué en S09.6 (axe 7) suite à l'ajout d'un data layer
+Chainlit SQLite anonyme : la sidebar conversations survit aux
+redémarrages serveur tant que le fichier ``data/cl_threads.db`` est
+préservé (bake Docker + volume Railway). L'ancien wording "pas de
+stockage permanent" devenait inexact.
 
 Ticks RGPD + attribution partenaire + lien repo = 3 signaux pros pour
 coût zéro.

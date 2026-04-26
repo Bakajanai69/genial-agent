@@ -7,7 +7,7 @@
    sur ``.MuiBox-root``. Documenté en S09 README "next step : footer
    via cl.Element side-pane". */
 #chat-container::after {
-    content: "Données via Pappers · Modèles Claude (Anthropic) · Messages traités en US (Anthropic) et FR (Pappers). Pas de stockage permanent.";
+    content: "Données via Pappers · Modèles Claude (Anthropic) · Messages traités en US (Anthropic) et FR (Pappers). Historique de session conservé localement (SQLite anonymisé), pas de partage tiers.";
     display: block;
     text-align: center;
     font-size: 0.75rem;

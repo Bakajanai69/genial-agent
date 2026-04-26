@@ -356,4 +356,81 @@ indisponibles le 2026-04-25 après-midi).
 | `trace_S095.py G4 iter02_postfix` | 1 (sirenisateur OK + comptes-entreprise refusé) |
 | **Cumul phase 2 + post-review** | **~30** |
 
+---
+
+## Après S09.6 — Workaround tools MCP & cache crédits persistant
+
+**Statut** : phase 2 dev livrée 2026-04-26. Review S09.6 à venir.
+
+### Décisions appliquées
+
+| Axe | Décision | Implémentation |
+|---|---|---|
+| 1 | Matrice tools (A1+A2) | `docs/pappers-mcp.md` §4.2.2 + bloc "Carte des tools Pappers" dans `prompts.py` |
+| 2 | Fallback B3 hybride | `WORKAROUND_HINTS` + `_build_workaround_tool_result` dans `mcp_pappers.py` |
+| 3 | Cache prod hybride C5+C1 | bake `data/` versionné + bootstrap `data_bootstrap.py` vers volume Railway `/data` |
+| 4 | TTL différencié D2 | `TOOL_TTL_OVERRIDES` + `DEFAULT_TTL_S` 24h dans `mcp_cache.py` |
+| 5 | Pre-warm E1+E2 | `scripts/prewarm_comptes_entreprise.py` + branchement `prewarm_cache()` dans `app.py:on_chat_start` |
+| 6 | Refus poli F1+F3 | règle 8 dans `prompts.py` + section S09.6 dans `EVALUATION.md` |
+| 7 | Data layer Chainlit H3' | `src/genial_agent/ui/chainlit_data_layer.py` (~330 lignes BaseDataLayer SQLite) + footer RGPD ajusté |
+| 8 | Ticket Pappers I1 | envoyé 2026-04-25 (cf. ci-dessous) |
+
+### Couverture 95 % — preuve
+
+Pack golden G1-G5 mis à jour avec assertions resserrées (Q2 user
+confirmé 2026-04-26) :
+
+- **G2** : ≥ 5 SIRENs distincts (vs ≥ 3 S09.5).
+- **G4** : valeur chiffrée présente à proximité de "résultat net" /
+  "bénéfice" (vs simple mention de l'année).
+
+Run `make test-integration` post-implémentation : à exécuter en phase 3
+review (consomme 0 crédit Pappers grâce au cache pré-warmé sur les 4
+entités golden, modulo recherche-dirigeants(q) qui est une chaîne libre
+non pré-warmable — 1 crédit unique).
+
+### Refus 5 % — comportement attendu
+
+Le scope rare non-couvert (**comparaison multi-années détaillée**
+multi-entités quand l'abo Pappers est saturé ET cache miss) déclenche
+le refus poli système §8 :
+
+> *« Les comptes annuels détaillés multi-années Pappers ne sont pas
+> accessibles en ce moment (limite côté API). Voici les données
+> headline disponibles pour la dernière année close : … »*
+
+L'agent fournit ensuite les chiffres récupérés via
+``recherche-entreprises`` (1 crédit PAYG, accepté).
+
+### Ticket support Pappers (I1)
+
+**Envoyé** 2026-04-25 par Lancelot à `[email protected]` avec :
+
+- Diag complet bug PAYG sur `comptes-entreprise` et `informations-entreprise`.
+- Référence à la doc Pappers §"Pay as You Go credits can take over…".
+- Lien vers `traces/S095_payg_probe_matrix.json` (matrice live PAYG/abo).
+- Request IDs et timestamps des appels probe (gratuits).
+
+**En attente de retour Pappers** (sans dépendance pour la démo Fabien
+2026-04-27 — workaround S09.6 indépendant).
+
+**Trigger retrait B3** : si Pappers répond *"fix shipped en version
+X.Y"*, ouvrir une story S09.8 pour retirer les ~15 lignes de
+`WORKAROUND_HINTS` dans `mcp_pappers.py` + tests associés
+(`tests/unit/test_S096_fallback.py`).
+
+### Crédits consommés en phase 2 dev
+
+Cible story : < 50 abo + < 30 PAYG.
+
+| Action | Crédits |
+|---|---:|
+| `probe_tools_matrix.py` (A1) — non joué dans cette session, à exécuter optionnellement | 0 (à prévoir : ~6 PAYG) |
+| Tests unit S09.6 (test_S096_*.py) | 0 (mocks) |
+| **Cumul phase 2 dev S09.6** | **0** (les modifications sont code-only ; le pre-warm `comptes-entreprise` réel est un usage opérateur, hors phase 2 dev) |
+
+→ Sous le cap. La prochaine consommation aura lieu via
+``make prewarm-comptes`` au refill abo (le 30/04) — ~24 crédits abo
+estimés pour les 4 entités × 3 années.
+
 Toujours sous le cap mou < 50.

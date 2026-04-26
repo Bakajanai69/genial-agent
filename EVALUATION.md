@@ -84,6 +84,37 @@ et le message ne descend même pas jusqu'à Claude.
 - **Robustesse** : refus propre sur scope / jailbreak / PII.
 - **Transparence** : steps tool ouverts, badge modèle, score critic,
   footer RGPD + attribution Pappers + lien GitHub.
+- **Sidebar conversations** (S09.6) : tes conversations précédentes
+  apparaissent dans la sidebar gauche (icône 🗂). Resume au clic.
+  L'historique survit aux redémarrages serveur (volume Railway +
+  bake Docker, persistance SQLite anonymisée).
+
+## Comportements attendus à connaître (S09.6)
+
+### Refus poli "comptes multi-années indisponibles"
+
+Si tu poses une question type *« compare le résultat net de Carrefour
+sur 5 ans »* et que **l'abonnement Pappers est saturé**, l'agent peut
+répondre :
+
+> *« Les comptes annuels détaillés multi-années Pappers ne sont pas
+> accessibles en ce moment (limite côté API). Voici les données
+> headline disponibles pour la dernière année close : … »*
+
+C'est le **comportement attendu**, pas un bug. Le tool
+``comptes-entreprise`` est consommé sur les jetons abonnement Pappers ;
+pendant la fenêtre où l'abonnement est à 0, un bug serveur Pappers
+bloque le fallback automatique sur les jetons Pay-As-You-Go (cf.
+[`docs/pappers-mcp.md`](docs/pappers-mcp.md) §4.2). L'agent rebascule
+proprement sur ``recherche-entreprises`` qui retourne le CA / résultat
+headline de l'année courante en 1 crédit PAYG. Ticket Pappers ouvert
+2026-04-25, en attente fix.
+
+→ Pour la démo, les payloads ``comptes-entreprise`` des 4 entités
+golden (LVMH, BNP, Carrefour, Casino) × 3 années (2022-2024) sont
+**pré-cachés sur disque** (commit ``data/mcp_cache.json``) et servis
+sans appel live (TTL 7 jours). U3 fonctionne donc sans dépendre de
+l'état des crédits abo.
 
 ## Pour aller plus loin
 

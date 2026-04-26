@@ -63,11 +63,25 @@ import structlog
 
 logger = structlog.get_logger(__name__)
 
-# TTL bumpé 24h → 7j (review S09.5 post-fix, 2026-04-25).
-# Rationale : couvre la fenêtre où le pack mensuel Pappers est saturé
-# (recharge mensuelle, jusqu'à 30 jours sans refill), ainsi que les bugs
-# Pappers de routage PAYG (cf. docs/pappers-mcp.md §4).
-DEFAULT_TTL_S = 7 * 24 * 3600  # 7 jours
+# TTL différencié par tool (S09.6 — D2).
+#
+# Historique :
+# - S02 : TTL 24h uniforme.
+# - S09.5 post-fix : bumpé à 7j pour absorber la fenêtre du bug PAYG
+#   (`comptes-entreprise` qui refuse les jetons PAYG quand l'abo est vide).
+# - S09.6 : retour à 24h par défaut + override 7j sur les tools "snapshots"
+#   annuels et lourds en crédits (`comptes-entreprise`, `cartographie-entreprise`)
+#   qui ne bougent que quelques fois par an. Les tools "live" (sirenisateur,
+#   recherche-entreprises, recherche-dirigeants, conformite-personne-physique)
+#   peuvent bouger plus souvent (changement de raison sociale, fusion,
+#   nouveaux mandats) → 24h pour rester à jour sans gaspiller le cache.
+DEFAULT_TTL_S = 24 * 3600  # 24h (tools "live")
+TOOL_TTL_OVERRIDES: dict[str, int] = {
+    # Tools "snapshots" annuels — données peu volatiles, lourds en crédits.
+    # 7j absorbe les fenêtres de blocage abo / bug PAYG côté Pappers.
+    "comptes-entreprise": 7 * 24 * 3600,
+    "cartographie-entreprise": 7 * 24 * 3600,
+}
 DEFAULT_MAX_SIZE = 1024  # cf. review S02 C5
 
 
@@ -196,8 +210,13 @@ class ToolCache:
 
     async def set(self, tool_name: str, args: dict[str, Any], value: dict[str, Any]) -> None:
         k = self.key(tool_name, args)
+        # TTL différencié par tool (S09.6 — D2). Lookup à chaque set : le
+        # mapping est petit (~2 entrées), pas de coût mesurable. Override
+        # > self._ttl est intentionnel ici (le TTL d'instance reste le
+        # plancher pour les tools sans override explicite).
+        ttl = TOOL_TTL_OVERRIDES.get(tool_name, self._ttl)
         async with self._lock:
-            self._store[k] = _Entry(value=value, expires_at=time.time() + self._ttl)
+            self._store[k] = _Entry(value=value, expires_at=time.time() + ttl)
             self._store.move_to_end(k)
             # Éviction LRU si on dépasse la borne (fait dans la boucle
             # pour absorber les inserts multiples lors d'un warmup).

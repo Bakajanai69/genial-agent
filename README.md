@@ -100,6 +100,27 @@ MCP client streamable-http
 mcp.pappers.fr/{API_KEY}
 ```
 
+## Limites connues (S09.6)
+
+- **Comptes annuels multi-années Pappers** : le tool ``comptes-entreprise``
+  refuse parfois les jetons Pay-As-You-Go (bug serveur Pappers, ticket
+  ouvert 2026-04-25). Mitigation S09.6 :
+  - Cache disque baked dans Docker (``data/mcp_cache.json``) +
+    volume persistant Railway (``/data``) → les 4 entités golden
+    × 3 années sont servies depuis le cache (TTL 7j) sans appel live.
+  - Pre-warm manuel mensuel via `make prewarm-comptes` au refill du
+    pack abonnement.
+  - Fallback automatique côté agent : si cache miss + abo épuisé, le
+    tool retourne un ``workaround_hint`` qui dirige Claude vers
+    ``recherche-entreprises`` (CA / résultat headline en 1 crédit
+    PAYG) ou un refus poli sourcé.
+  - Détail dans [`docs/pappers-mcp.md`](docs/pappers-mcp.md) §4.2 + §4.3.
+- **Conversation Chainlit "fini"** : la sidebar liste les
+  conversations précédentes (data layer SQLite ``data/cl_threads.db``).
+  Persiste tant que le volume Railway est intact ; un rebuild Docker
+  qui repart du bake écrase l'historique runtime — acceptable pour la
+  démo.
+
 ## Sécurité & robustesse
 
 - **6 couches** garde-fous : input gate (regex anti-injection 2026 sur

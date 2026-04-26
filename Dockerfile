@@ -39,6 +39,14 @@ COPY --chown=agent:agent chainlit.md ./
 COPY --chown=agent:agent public ./public
 COPY --chown=agent:agent .chainlit ./.chainlit
 
+# S09.6 — Bootstrap des caches (mcp_cache.json + cl_threads.db) baked
+# dans l'image. Au boot Railway, src/genial_agent/data_bootstrap.py
+# copie ces fichiers vers le volume persistant /data si vide. Les
+# données Pappers cachées sont publiques (raisons sociales, bilans,
+# SIREN) — pas de secret, pas de PII. Cf. story S09.6 §"Architecture
+# phase 1 — Axe 3 révisé".
+COPY --chown=agent:agent data ./data
+
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \

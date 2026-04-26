@@ -1,4 +1,4 @@
-.PHONY: install run test test-unit test-integration test-all lint format docker-build precommit
+.PHONY: install run test test-unit test-integration test-all lint format docker-build precommit prewarm-comptes
 
 install:
 	uv sync --extra dev
@@ -44,3 +44,13 @@ docker-build:
 
 precommit:
 	uv run pre-commit run --all-files
+
+# S09.6 (E1) — Pre-warm le cache MCP pour `comptes-entreprise` sur les
+# 4 entités golden × 3 années. À lancer manuellement au refill du pack
+# mensuel Pappers (le 30/04 puis mensuel) — le tool refuse les jetons
+# PAYG (bug serveur). Coût attendu : ~24 crédits abo. Output dans
+# `data/mcp_cache.json` (versionné). Commit le diff après run pour que
+# le cache enrichi soit propagé à Railway au prochain build.
+prewarm-comptes:
+	MCP_CACHE_PERSIST_PATH=data/mcp_cache.json \
+		uv run python scripts/prewarm_comptes_entreprise.py

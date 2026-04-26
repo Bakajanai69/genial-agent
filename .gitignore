@@ -57,8 +57,17 @@ traces/*.jsonl
 # reste local.
 traces/*.json
 
-# S09.5 post-fix — cache MCP persistent sur disque. Contient des
-# payloads Pappers parfois lourds (centaines de Ko) — JAMAIS commité.
-# Cf. ``src/genial_agent/mcp_cache.py`` + variable d'env
-# ``MCP_CACHE_PERSIST_PATH`` qui pointe par convention sur ``data/``.
-data/
+# S09.6 — Bootstrap des caches versionnés pour que l'image Docker
+# embarque un état initial valide (aucun crédit Pappers consommé au
+# premier boot Railway). Données publiques uniquement : Pappers ne
+# renvoie que des bilans / raisons sociales / SIREN publics, et le
+# data layer Chainlit utilise un user "anonymous" constant (pas d'auth,
+# pas de PII). Au runtime, le volume Railway monté sur /data prend le
+# relais (cf. docs/stories/S09.6-mcp-workaround-and-credit-cache.md
+# §"Architecture phase 1 — Axe 3 révisé").
+#
+# Tout autre fichier sous data/ (snapshots locaux, dumps de debug)
+# reste ignoré par défaut.
+data/*
+!data/mcp_cache.json
+!data/cl_threads.db

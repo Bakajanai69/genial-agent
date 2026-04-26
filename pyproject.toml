@@ -14,6 +14,11 @@ dependencies = [
     "structlog>=25.5.0,<26",
     "python-dotenv>=1.2.2,<2",
     "tenacity>=9.1.4,<10",
+    # S09.6 (H3') — backend async SQLite pour le data layer Chainlit
+    # custom (persistance des conversations sans Postgres ni S3).
+    # Borne haute lâche (<1.0) — aiosqlite est stable, breaking changes
+    # rares. 0.22.1 est la dernière stable PyPI au 2026-04-26.
+    "aiosqlite>=0.20.0,<1.0",
 ]
 
 [project.optional-dependencies]

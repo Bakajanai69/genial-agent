@@ -26,6 +26,8 @@ import structlog
 
 from genial_agent import mcp_pappers
 from genial_agent.agent import ConversationState
+from genial_agent.config import settings
+from genial_agent.data_bootstrap import bootstrap_volume_from_bake
 from genial_agent.guardrails import budget, run_guarded_turn
 from genial_agent.guardrails.caps import DAILY_PAPPERS_CREDITS_CAP
 from genial_agent.observability import (
@@ -36,11 +38,15 @@ from genial_agent.observability import (
     mount_routes,
 )
 from genial_agent.observability import (
+    degraded as credits_degraded,
+)
+from genial_agent.observability import (
     incr as stats_incr,
 )
 from genial_agent.observability import (
     remaining as credits_remaining,
 )
+from genial_agent.ui.chainlit_data_layer import AnonymousSQLiteDataLayer
 from genial_agent.ui.entity_tracker import (
     ActiveEntity,
     extract_active_entity,
@@ -49,6 +55,12 @@ from genial_agent.ui.entity_tracker import (
 from genial_agent.ui.events import TurnState, dispatch_event
 from genial_agent.ui.post_process import linkify_sirens, model_badge
 from genial_agent.ui.starters import STARTERS
+
+# S09.6 — Bootstrap du volume Railway depuis le bake Docker AVANT que
+# le ToolCache et le ChainlitDataLayer ne lisent leurs fichiers. No-op
+# en local (le volume /data n'existe pas) — le cache lit alors le bake
+# directement via ``MCP_CACHE_PERSIST_PATH=data/mcp_cache.json`` en CWD.
+bootstrap_volume_from_bake()
 
 # S07 — configurer structlog JSON + monter /health et /stats AVANT que
 # Chainlit serve la 1ère requête. Les deux fonctions sont idempotentes
@@ -68,6 +80,25 @@ _CREDITS_LOW_THRESHOLD = max(1, DAILY_PAPPERS_CREDITS_CAP // 10)
 # bascule en mode "MCP KO" visible plutôt que de faire poireauter
 # l'évaluateur sur un on_chat_start qui ne se termine jamais.
 _HEALTHCHECK_TIMEOUT_S: float = 3.0
+
+# S09.6 (H3') — Chemin du fichier SQLite du data layer Chainlit. En prod
+# Railway, on pointe sur le volume monté (``/data/cl_threads.db`` via
+# ``CHAINLIT_DATA_LAYER_DB_PATH``). En local, fallback sur le bake.
+import os as _os  # noqa: E402
+
+_CL_DB_PATH = _os.getenv("CHAINLIT_DATA_LAYER_DB_PATH", "data/cl_threads.db")
+
+
+@cl.data_layer
+def get_data_layer() -> AnonymousSQLiteDataLayer:
+    """Custom Chainlit data layer SQLite anonymous-user.
+
+    Persistance des threads + steps pour que la sidebar Chainlit (liste
+    des conversations précédentes) survive aux redémarrages serveur.
+    Pas d'auth, pas de S3, pas de Postgres — un seul fichier SQLite
+    baké dans Docker + monté sur le volume Railway au runtime.
+    """
+    return AnonymousSQLiteDataLayer(db_path=_CL_DB_PATH)
 
 
 def _resolve_session_id() -> str:
@@ -165,6 +196,21 @@ async def on_chat_start() -> None:
             author="Système",
             type="system_message",
         ).send()
+
+    # S09.6 (E2) — Pre-warm best-effort du cache MCP au boot d'un chat.
+    # Couvre le cas où le bake Docker / le volume Railway ne contient
+    # pas (encore) les sirenisateurs des entités golden — ex. premier
+    # déploiement avec un cache vide. N'échoue jamais : si crédits
+    # épuisés ou MCP KO, on log et on continue. Mode dégradé skippé
+    # (pas la peine de tenter des appels qui vont être refusés).
+    if settings.PAPPERS_API_KEY and not credits_degraded():
+        try:
+            await mcp_pappers.prewarm_cache()
+        except Exception as exc:  # noqa: BLE001 — best-effort, pas un bloquant
+            logger.info(
+                "ui_prewarm_skip_at_boot",
+                error_type=type(exc).__name__,
+            )
 
 
 @cl.on_message
