@@ -132,16 +132,21 @@ _OWNER_COOKIE_RE_AUTH = _re_module.compile(r"\bgenial_owner_id=([A-Za-z0-9-]{8,6
 
 
 @cl.header_auth_callback
-def auth_callback(headers: object) -> cl.User | None:
+async def auth_callback(headers: object) -> cl.User | None:
     """Authentifie le visiteur via le cookie ``genial_owner_id``.
 
     Toujours retourne un User (jamais None) pour que Chainlit active
     la sidebar conversations. L'identifier est l'UUID du cookie quand
     présent, sinon un UUID éphémère ``anon-<hex16>``.
+
+    **Async** parce que Chainlit ``header_auth_callback`` attend
+    ``Awaitable[Optional[User]]`` (signature documentée
+    ``async def header_auth_callback(headers: Headers)``).
     """
     cookie_header = headers.get("cookie", "") if hasattr(headers, "get") else ""
     match = _OWNER_COOKIE_RE_AUTH.search(cookie_header) if cookie_header else None
     if match:
+        logger.info("auth_user_resolved_from_cookie", identifier_prefix=match.group(1)[:8])
         return cl.User(
             identifier=match.group(1),
             metadata={"source": "cookie", "persistent": True},
@@ -149,6 +154,7 @@ def auth_callback(headers: object) -> cl.User | None:
     # Fallback éphémère : 1er pageload avant que owner-cookie.js ait tourné.
     # Le 2ème pageload récupèrera le cookie et l'identifier sera stable.
     fallback = f"anon-{uuid.uuid4().hex[:16]}"
+    logger.info("auth_user_fallback_anon", identifier_prefix=fallback[:8])
     return cl.User(
         identifier=fallback,
         metadata={"source": "fallback", "persistent": False},
