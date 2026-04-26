@@ -152,20 +152,33 @@ async def test_system_is_a_list_with_cache_control(
     assert last_block.get("cache_control") == {"type": "ephemeral"}
 
 
-async def test_last_message_block_has_cache_control(
+async def test_messages_passed_through_unchanged(
     patched_anthropic: dict[str, Any],
 ) -> None:
-    """Le dernier ``content`` block du dernier message a ``cache_control``."""
+    """``messages`` est forwardé tel quel à l'API Anthropic, **sans**
+    cache_control posé en dynamique sur ``messages[-1]``.
+
+    Régression S09.7 phase 2 (run G1 live 2026-04-26) : poser
+    ``cache_control`` sur un block ``tool_result`` du dernier message
+    fait chuter ``input_tokens`` à 2 et l'agent boucle sur le même
+    tool sans "voir" les résultats. Garder uniquement les 2
+    breakpoints stables (tools + system) suffit à obtenir un
+    cache_read substantiel au tour N+1 sans casser la visibilité
+    du contexte conversation.
+    """
     state = ConversationState()
     async for _ in run_turn(state, "Hello world", tier=ModelTier.HAIKU):
         pass
     messages = patched_anthropic["captured"]["messages"]
     last_msg = messages[-1]
     content = last_msg["content"]
-    # Le content peut être une liste ou une string ; après notre
-    # transformation, il est forcément une liste.
-    assert isinstance(content, list)
-    assert content[-1].get("cache_control") == {"type": "ephemeral"}
+    # Si content est une string, on la passe brute (pas de transformation
+    # bloc-cache_control). Si liste, aucun bloc ne doit porter
+    # cache_control (c'est l'objet du test : pas de breakpoint dynamique).
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict):
+                assert "cache_control" not in block
 
 
 async def test_llm_meta_forwards_cache_token_counts(

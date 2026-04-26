@@ -403,35 +403,21 @@ async def run_turn(
             }
         ]
 
-        # Couche (3) messages : on marque le DERNIER content block du
-        # DERNIER message de l'historique. Couvre tout l'historique au
-        # tour N+1 (le tour N voit déjà le préfixe tools+system caché).
-        # Pattern documenté Anthropic "Tool use with prompt caching".
-        messages_for_call: list[MessageParam] = list(state.messages)
-        if messages_for_call:
-            last = messages_for_call[-1]
-            content = last.get("content")
-            if isinstance(content, list) and content:
-                # Liste de blocks : marquer le dernier sans muter le state.
-                last_block = content[-1]
-                if isinstance(last_block, dict):
-                    new_content = [
-                        *content[:-1],
-                        {**last_block, "cache_control": {"type": "ephemeral"}},
-                    ]
-                    messages_for_call[-1] = {**last, "content": new_content}
-            elif isinstance(content, str):
-                # String content : convertir en bloc texte avec cache_control.
-                messages_for_call[-1] = {
-                    **last,
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": content,
-                            "cache_control": {"type": "ephemeral"},
-                        }
-                    ],
-                }
+        # Couche (3) messages : DÉSACTIVÉE (S09.7 phase 2 hotfix
+        # 2026-04-26). Poser ``cache_control`` sur ``messages[-1]`` —
+        # qui est typiquement un block ``tool_result`` au tour N+1 —
+        # corrompt la visibilité du contexte conversation par Claude.
+        # Run live G1 reproduit : `input_tokens` chute à 2, l'agent
+        # boucle sur le même tool sans jamais "voir" les tool_results
+        # qu'il reçoit pourtant. Hypothèse : Anthropic n'accepte pas
+        # silencieusement ``cache_control`` sur un tool_result block,
+        # ou le breakpoint trop dynamique invalide tout le préfixe.
+        # Garder uniquement les 2 breakpoints stables (tools + system)
+        # est suffisant pour un cache hit substantiel sur les rounds
+        # N+1 (preuve : `cache_read_tokens` ~21K observé). À investiguer
+        # en S09.8 (peut-être un breakpoint sur le DERNIER user msg
+        # texte uniquement, jamais sur un tool_result).
+        messages_for_call: list[MessageParam] = state.messages
 
         # ``inference_geo`` n'est supporté que sur Sonnet à date (2026-04-24).
         # Haiku rejette avec ``BadRequestError 400 : "<id> does not support
