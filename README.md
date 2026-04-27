@@ -74,6 +74,22 @@ Détails complets et alternatives (Bedrock EU, Vertex AI EU,
 Microsoft Foundry EU) dans
 [`docs/cahier-des-charges.md`](docs/cahier-des-charges.md) §6.2.
 
+## Pour aller droit aux décisions
+
+Si tu lis ce repo en mode CTO et tu as 5 min, ouvre dans cet ordre :
+
+1. **[`docs/architecture-decisions.md`](docs/architecture-decisions.md)**
+   — 12 ADR condensés à la 1ère personne : ce que j'ai choisi, ce que
+   j'ai écarté, et pourquoi. Inclut l'architecture cible AWS si on
+   productionnise.
+2. **[`docs/workflow-claude-code.md`](docs/workflow-claude-code.md)**
+   — comment j'utilise Claude Code en méthodo 3 phases (Elicitation /
+   Dev / Review). Trace explicitement où je tranche vs où je laisse
+   l'outil proposer.
+3. **[`docs/cahier-des-charges.md`](docs/cahier-des-charges.md) §13 bis**
+   — chronologie d'implémentation post-MVP (S09.5 → S10) avec
+   triggers et arbitrages.
+
 ## Tester
 
 Parcours **5 min** complet pour évaluateur :
