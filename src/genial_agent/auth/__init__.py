@@ -15,6 +15,7 @@ voit immédiatement un User stable et persistant.
 
 from __future__ import annotations
 
+from genial_agent.auth.context import current_owner_id
 from genial_agent.auth.middleware import (
     OWNER_COOKIE_NAME,
     OWNER_COOKIE_RE,
@@ -26,6 +27,7 @@ from genial_agent.auth.mount import mount_auth_middleware
 __all__ = [
     "OWNER_COOKIE_NAME",
     "OWNER_COOKIE_RE",
+    "current_owner_id",
     "ensure_owner_cookie_dispatch",
     "generate_owner_id",
     "mount_auth_middleware",

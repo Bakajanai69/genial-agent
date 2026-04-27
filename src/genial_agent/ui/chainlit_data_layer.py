@@ -85,21 +85,23 @@ def _resolve_owner_id() -> str:
     """Retourne l'``owner_id`` de la session courante, ou
     ``ANONYMOUS_USER_ID`` en fallback (hors contexte Chainlit).
 
-    Ordre de priorité (S09.7 hotfix v2 — auth callback) :
+    Ordre de priorité (S09.7 hotfix v5 — ContextVar HTTP middleware) :
 
     1. **``cl.user_session.get("user").identifier``** — User retourné
-       par ``app.py:auth_callback`` (`@cl.header_auth_callback`), qui
-       lit le cookie ``genial_owner_id`` posé par
-       ``public/owner-cookie.js``. C'est la **source d'identité
-       durable** du visiteur (cross-session, cross-refresh).
-       L'auth callback est ce qui permet à Chainlit d'invoquer
-       ``data_layer.list_threads`` et donc d'afficher la sidebar.
-    2. **Cookie HTTP direct** lu via ``cl.context.session.environ`` —
-       fallback si l'auth callback n'a pas encore tourné (timing
-       race au tout 1er pageload).
-    3. **``cl.user_session.get(SESSION_OWNER_KEY)``** — UUID éphémère
+       par ``app.py:auth_callback`` (`@cl.header_auth_callback`).
+       Disponible UNIQUEMENT en contexte WebSocket actif.
+    2. **Cookie HTTP direct via ``cl.context.session.environ``** —
+       fallback si l'auth callback n'a pas encore tourné mais on est
+       toujours en WebSocket.
+    3. **``auth.context.current_owner_id`` ContextVar** — posé par
+       ``auth/middleware.py`` sur **chaque** requête HTTP (y compris
+       les routes REST que Chainlit appelle hors WebSocket, ex :
+       ``/api/thread/<id>`` que la sidebar fetch). Couvre le trou
+       entre HTTP middleware et data layer Chainlit.
+    4. **``cl.user_session.get(SESSION_OWNER_KEY)``** — UUID éphémère
        par-session-WebSocket, fallback historique S09.6.
-    4. **``ANONYMOUS_USER_ID``** — hors contexte Chainlit (tests unit).
+    5. **Sentinel ``__no_owner_resolved__``** — hors contexte
+       (tests unit, scripts) ou auth pas encore résolue.
 
     Import tardif de ``chainlit`` : le data layer est importable hors
     contexte Chainlit (tests unit, scripts).
@@ -141,7 +143,26 @@ def _resolve_owner_id() -> str:
     except Exception:  # noqa: BLE001, S110
         pass
 
-    # 3. UUID éphémère par-session-WebSocket (fallback historique S09.6).
+    # 3. ContextVar posé par ``auth/middleware.py`` sur la requête HTTP
+    # courante. Couvre les routes REST hors contexte WebSocket Chainlit
+    # (typique : la sidebar fetch ``/api/thread/<id>``) où les sources 1
+    # et 2 ne sont pas accessibles.
+    try:
+        from genial_agent.auth.context import current_owner_id
+
+        ctx_owner = current_owner_id.get()
+        if isinstance(ctx_owner, str) and ctx_owner:
+            logger.info(
+                "data_layer_owner_resolved",
+                priority=3,
+                source="auth_context_var",
+                identifier_prefix=ctx_owner[:8],
+            )
+            return ctx_owner
+    except Exception:  # noqa: BLE001, S110
+        pass
+
+    # 4. UUID éphémère par-session-WebSocket (fallback historique S09.6).
     try:
         import chainlit as cl
 
@@ -149,7 +170,7 @@ def _resolve_owner_id() -> str:
         if isinstance(owner, str) and owner:
             logger.info(
                 "data_layer_owner_resolved",
-                priority=3,
+                priority=4,
                 source="user_session.SESSION_OWNER_KEY",
                 identifier_prefix=owner[:8],
             )
@@ -157,13 +178,13 @@ def _resolve_owner_id() -> str:
     except Exception:  # noqa: BLE001, S110
         pass
 
-    # 4. Hors contexte (tests unit, scripts) ou auth pas encore résolue.
+    # 5. Hors contexte (tests unit, scripts) ou auth pas encore résolue.
     # S09.7 hotfix v4 : on retourne un **sentinel qui ne match aucun
     # thread** (pas ANONYMOUS_USER_ID qui matchait les threads pollués
     # pré-fix v3). Si on retourne ANONYMOUS_USER_ID ici, list_threads
     # appelé hors contexte WebSocket leakerait les threads anonymous
     # à tout le monde.
-    logger.info("data_layer_owner_resolved", priority=4, source="sentinel")
+    logger.info("data_layer_owner_resolved", priority=5, source="sentinel")
     return "__no_owner_resolved__"
 
 

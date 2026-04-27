@@ -221,7 +221,14 @@ async def ensure_owner_cookie_dispatch(
     On ne mint que sur les pageloads HTML (``_is_html_pageload``) pour
     éviter le multi-mint en cas de pageload parallèle (cf. docstring
     de ``_is_html_pageload``).
+
+    En plus du cookie, on pose l'``owner_id`` effectif dans un
+    ``ContextVar`` (``auth.context.current_owner_id``) pour qu'il soit
+    accessible au data layer Chainlit même quand celui-ci est invoqué
+    hors contexte WebSocket (ex : route REST de la sidebar threads).
     """
+    from genial_agent.auth.context import current_owner_id
+
     cookie_header = request.headers.get("cookie", "")
     existing = _extract_existing_owner_id(cookie_header)
 
@@ -245,7 +252,15 @@ async def ensure_owner_cookie_dispatch(
             path=request.url.path,
         )
 
-    response = await call_next(request)
+    # Pose le ``owner_id`` effectif dans le ContextVar pour la durée du
+    # ``call_next`` — le data layer Chainlit pourra le lire en priorité
+    # quand son contexte WebSocket n'est pas dispo.
+    effective_owner = existing or minted_id
+    token = current_owner_id.set(effective_owner)
+    try:
+        response = await call_next(request)
+    finally:
+        current_owner_id.reset(token)
 
     if minted_id is not None:
         is_secure = _request_is_secure(request)
