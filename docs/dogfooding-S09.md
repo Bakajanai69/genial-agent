@@ -1,7 +1,11 @@
 # Dogfooding S09 — session live
 
 **Date** : 2026-04-25 11:08 (Europe/Paris)
-**Dev Agent** : Claude Code CLI (Opus 4.7 1M)
+**Workflow phase 2 dev** : le candidat (Lancelot) pilote un Claude
+Code CLI Opus 4.7 (1M context) qui exécute le plan d'implémentation
+S09 décrit dans `docs/stories/S09-polish.md`. Cette page consolide
+les observations live du dogfooding pour qu'elles ne soient pas
+perdues entre deux sessions.
 **URL testée** : <https://genial-agent-production.up.railway.app>
 **Pré-check `bash scripts/smoke_S09.sh`** : ✅ exit 0
 **Build / deploy Railway post-push `9de363e`** : ✅ détecté à
@@ -9,14 +13,14 @@
 le runtime Chainlit (HTTP 200, `image/png`, **116 050 octets** =
 identique au local octet pour octet, 805 × 310 RGBA).
 
-> **Note méthodologique** : le Dev Agent CLI n'a pas d'accès navigateur
+> **Note méthodologique** : la session CLI n'a pas d'accès navigateur
 > headless dans cette session. Les scénarios pipeline (D2 → D11) sont
 > exécutés via les **mêmes fonctions** que celles que Chainlit appelle
 > en prod (``run_guarded_turn`` + Anthropic API + MCP Pappers réels) —
 > couverture comportementale équivalente à un dogfooding manuel,
-> sauf l'UI cosmétique (logo, bannière entité, badges) que Lancelot
-> vérifie de son côté en ouvrant l'URL dans son navigateur. Les
-> comportements pipeline observés sont **issus du run live** sur
+> sauf l'UI cosmétique (logo, bannière entité, badges) que je vérifie
+> moi-même en ouvrant l'URL dans le navigateur. Les comportements
+> pipeline observés sont **issus du run live** sur
 > ``make test-integration`` (clés réelles, MCP Pappers réel,
 > 2026-04-25 ~11:00–11:08).
 

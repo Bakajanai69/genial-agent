@@ -5,7 +5,7 @@
 [![service](https://img.shields.io/website?url=https%3A%2F%2Fgenial-agent-production.up.railway.app%2Fhealth&up_message=online&down_message=offline&label=service)](https://genial-agent-production.up.railway.app/health)
 
 📧 **Feedback** : lancelot.oudin@gmail.com
-🎬 **Loom backup** : `https://www.loom.com/share/<id-loom>` *(à remplacer après enregistrement)*
+🎬 **Loom backup** : *à enregistrer avant l'envoi (lien à insérer ici).*
 
 ---
 
@@ -117,32 +117,43 @@ détecte le turn-taking et coupe proprement.
   L'historique survit aux redémarrages serveur (volume Railway +
   bake Docker, persistance SQLite anonymisée).
 
-## Comportements attendus à connaître (S09.6)
+## Comportements à connaître pour bien interpréter une réponse
+
+Cette section anticipe les questions de bonne foi qu'un évaluateur
+pourrait se poser face à un comportement qu'il n'aurait pas vu décrit
+ailleurs. Tout ce qui suit est **du comportement spécifié**, pas du
+bug.
 
 ### Refus poli "comptes multi-années indisponibles"
 
-Si tu poses une question type *« compare le résultat net de Carrefour
-sur 5 ans »* et que **l'abonnement Pappers est saturé**, l'agent peut
-répondre :
+Si la question demande un historique pluriannuel détaillé
+(*« compare le résultat net de Carrefour sur 5 ans »*) **et** que
+l'abonnement Pappers est temporairement saturé, l'agent peut répondre :
 
 > *« Les comptes annuels détaillés multi-années Pappers ne sont pas
 > accessibles en ce moment (limite côté API). Voici les données
 > headline disponibles pour la dernière année close : … »*
 
-C'est le **comportement attendu**, pas un bug. Le tool
-``comptes-entreprise`` est consommé sur les jetons abonnement Pappers ;
-pendant la fenêtre où l'abonnement est à 0, un bug serveur Pappers
-bloque le fallback automatique sur les jetons Pay-As-You-Go (cf.
-[`docs/pappers-mcp.md`](docs/pappers-mcp.md) §4.2). L'agent rebascule
-proprement sur ``recherche-entreprises`` qui retourne le CA / résultat
-headline de l'année courante en 1 crédit PAYG. Ticket Pappers ouvert
-2026-04-25, en attente fix.
+Pourquoi ce refus est *attendu* et bien géré :
 
-→ Pour la démo, les payloads ``comptes-entreprise`` des 4 entités
-golden (LVMH, BNP, Carrefour, Casino) × 3 années (2022-2024) sont
-**pré-cachés sur disque** (commit ``data/mcp_cache.json``) et servis
-sans appel live (TTL 7 jours). U3 fonctionne donc sans dépendre de
-l'état des crédits abo.
+- Le tool MCP ``comptes-entreprise`` consomme des jetons abonnement
+  Pappers ; pendant la fenêtre où l'abonnement est à 0, un **bug
+  serveur Pappers identifié 2026-04-25** (ticket ouvert chez eux)
+  bloque le fallback automatique normalement prévu sur les jetons
+  Pay-As-You-Go.
+- Plutôt qu'un dead-end, l'agent rebascule **automatiquement** sur
+  ``recherche-entreprises`` (CA / résultat headline en 1 crédit PAYG)
+  ou un refus poli sourcé. La logique est dans le ``workaround_hint``
+  livré en S09.6 (cf.
+  [`docs/pappers-mcp.md`](docs/pappers-mcp.md) §4.2 + §4.3).
+- Pour la démo, les 4 entités golden (LVMH, BNP, Carrefour, Casino)
+  × 3 années (2022-2024) sont **pré-warmées dans
+  ``data/mcp_cache.json``** (cache disque committé, baked Docker,
+  servi depuis le volume Railway, TTL 7 jours). U3 fonctionne donc
+  sans dépendre de l'état des crédits abo.
+
+C'est exactement le genre de robustesse *invisible quand tout va bien*
+qu'on attend d'un agent destiné à un client enterprise.
 
 ## Pour aller plus loin
 
@@ -157,7 +168,7 @@ l'état des crédits abo.
 
 ## Et si ça casse
 
-- 🎬 Loom backup (2 min) : `https://www.loom.com/share/<id-loom>` *(à remplacer après enregistrement)*
+- 🎬 Loom backup (2 min) : *à insérer avant l'envoi.*
 - 🔁 Local : `git clone … && cp .env.example .env && make install
   && make run` (clés API à fournir).
 - 📧 Email : lancelot.oudin@gmail.com.

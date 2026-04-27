@@ -2,10 +2,12 @@
 
 Agent IA spécialisé sur les entreprises françaises, branché sur le
 **MCP Pappers** (streamable-http). Construit dans le cadre d'un
-exercice d'évaluation AI Builder (week-end, ~12 h).
+exercice d'évaluation AI Builder, sur un week-end avec contraintes
+familiales — découpé en 10 stories verticales (S01 → S10) tracées
+dans `docs/stories/`.
 
 🔗 **Démo live** : <https://genial-agent-production.up.railway.app>
-🎬 **Loom 2 min** : `https://www.loom.com/share/<id-loom>` *(à remplacer après enregistrement)*
+🎬 **Loom 2 min** : *à enregistrer avant l'envoi au CTO*
 📦 **Repo** : <https://github.com/Bakajanai69/genial-agent>
 
 [![CI](https://github.com/Bakajanai69/genial-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/Bakajanai69/genial-agent/actions/workflows/ci.yml)
@@ -77,6 +79,61 @@ make test                        # unit only (gratuit)
 make test-integration            # live, opt-in (consomme crédits)
 ```
 
+## Chronologie d'implémentation (en 1 minute)
+
+Le projet est découpé en 10 stories verticales. Chaque story a son
+propre fichier dans `docs/stories/` avec : phase 1 d'élicitation
+(raffinage avant code, vérif des SDK 2026), phase 2 dev, phase 3
+review, et un journal des hotfixes appliqués en live. Lecture rapide
+recommandée pour suivre le cheminement décisionnel :
+
+1. **S01 → S03 (samedi matin, MVP)** — scaffold `uv` + `ruff`,
+   client MCP Pappers streamable-http (31 tools exposés, filtrage à
+   ceux utiles aux cas U1–U3), agent Claude avec tool-use natif.
+2. **S04 → S06 (samedi après-midi)** — routing Haiku ↔ Sonnet 3-couches
+   (keyword + auto-escalade + cap dur), 6 couches de garde-fous, UI
+   Chainlit avec steps tool ouverts.
+3. **S07 → S08 (samedi soir)** — `structlog` JSON + `/health` +
+   `/stats` Bearer-gated, Dockerfile + Railway EU-West Amsterdam +
+   keep-alive UptimeRobot keyword monitor.
+4. **S09 (dimanche matin, polish + dogfooding)** — README + EVALUATION
+   + pack adversarial 10 prompts. **Le dogfooding révèle un problème
+   produit** : sur U3 l'agent répond avec les bilans 2016 au lieu de
+   2024. Cause : payloads Pappers > 700 K chars sur Carrefour Hyper,
+   troncature S05 coupe avant les bilans récents.
+5. **S09.5 (rouverte dimanche après-midi)** — **Payload Vault** :
+   après comparaison de 5 patterns (programmatic tool calling, Deep
+   Agents filesystem, sub-agent synthesizer, wrapper per-tool,
+   hybride), choix d'un offload générique session-scoped + 2 tools
+   locaux ``payload_inspect`` / ``payload_search``. L'agent ré-interroge
+   un index JSON compact, raisonnement métier inchangé. Carrefour
+   passe verbatim au CA 2024.
+6. **S09.6 (dimanche soir)** — **mitigation Pappers PAYG**. Pendant
+   les retests, ``comptes-entreprise`` se met à refuser les PAYG par
+   intermittence (bug serveur Pappers). Cache disque baked + volume
+   Railway → 4 entités golden × 3 ans pré-warmées hors crédits.
+   Persistance SQLite des conversations Chainlit (sidebar threads
+   cross-session).
+7. **S09.7 (lundi)** — **robustesse extraction + cap UX**.
+   jsonpath-ng wildcards, prompt caching Anthropic
+   (``cache_control: ephemeral`` → bump tokens 80 K → 200 K),
+   cap-as-UX-event (« 🔄 Continuer » / « 📋 Synthèse partielle » au
+   lieu d'un dead-end), auto-continuation Vault. 18 hotfixes UI/UX
+   appliqués live (FOUC, splash, owner_id cookie, anti-zigzag).
+8. **S10 (mardi-mercredi, stretch voice)** — pivot du brief vocal v1
+   vers un **voice mode conversationnel** Eleven Agents (custom LLM
+   SSE + ASR + turn-taking + TTS streaming). L'agent reste 100 %
+   inchangé côté logique ; voice mode est une couche I/O wrapper.
+   POC end-to-end validé 2026-04-27.
+
+> Volontairement, **les stories sont des journaux de bord plutôt que
+> des post-mortems aseptisés** : on y trouve les hypothèses testées,
+> les hotfixes, les gotchas (ex : ElevenLabs append automatiquement
+> `/chat/completions` à l'URL custom LLM, cf.
+> [`docs/deployment.md`](docs/deployment.md) §3 ter). C'est plus lisible
+> qu'un post-mortem reformaté après coup et permet à un lecteur tiers
+> de juger non seulement le résultat mais aussi le processus.
+
 ## Architecture
 
 Cf. [`docs/cahier-des-charges.md`](docs/cahier-des-charges.md) §5.
@@ -100,26 +157,32 @@ MCP client streamable-http
 mcp.pappers.fr/{API_KEY}
 ```
 
-## Limites connues (S09.6)
+## Limites externes connues et mitigations livrées
+
+Deux contraintes du côté Pappers / Chainlit qui se manifestent en prod
+et que le repo documente + mitige plutôt que de les masquer :
 
 - **Comptes annuels multi-années Pappers** : le tool ``comptes-entreprise``
-  refuse parfois les jetons Pay-As-You-Go (bug serveur Pappers, ticket
-  ouvert 2026-04-25). Mitigation S09.6 :
-  - Cache disque baked dans Docker (``data/mcp_cache.json``) +
-    volume persistant Railway (``/data``) → les 4 entités golden
-    × 3 années sont servies depuis le cache (TTL 7j) sans appel live.
-  - Pre-warm manuel mensuel via `make prewarm-comptes` au refill du
-    pack abonnement.
-  - Fallback automatique côté agent : si cache miss + abo épuisé, le
-    tool retourne un ``workaround_hint`` qui dirige Claude vers
-    ``recherche-entreprises`` (CA / résultat headline en 1 crédit
-    PAYG) ou un refus poli sourcé.
+  refuse par intermittence les jetons Pay-As-You-Go (bug serveur
+  Pappers identifié 2026-04-25, ticket ouvert côté Pappers).
+  Mitigations livrées en **S09.6** :
+  - **Cache disque baked dans Docker** (``data/mcp_cache.json``) +
+    volume persistant Railway (``/data``) → 4 entités golden
+    × 3 années pré-warmées, servies depuis le cache (TTL 7 j) sans
+    appel live. La démo U3 ne dépend plus du solde abo Pappers.
+  - **Pre-warm manuel** via `make prewarm-comptes` au refill du pack
+    abonnement (rejouable avant chaque démo).
+  - **Fallback automatique côté agent** : si cache miss + abo épuisé,
+    le tool MCP retourne un ``workaround_hint`` qui dirige
+    l'agent vers ``recherche-entreprises`` (CA / résultat headline
+    en 1 crédit PAYG) ou un refus poli sourcé.
   - Détail dans [`docs/pappers-mcp.md`](docs/pappers-mcp.md) §4.2 + §4.3.
-- **Conversation Chainlit "fini"** : la sidebar liste les
-  conversations précédentes (data layer SQLite ``data/cl_threads.db``).
-  Persiste tant que le volume Railway est intact ; un rebuild Docker
-  qui repart du bake écrase l'historique runtime — acceptable pour la
-  démo.
+- **Persistance des conversations Chainlit** : data layer SQLite
+  ``data/cl_threads.db`` (S09.6) → la sidebar liste les conversations
+  précédentes et résume au clic. L'historique survit aux redémarrages
+  serveur tant que le volume Railway ``/data`` est intact ; un rebuild
+  Docker qui repart du bake écrase l'historique runtime — acceptable
+  pour le scope démo, à promouvoir Postgres en cas de scale-out.
 
 ## Sécurité & robustesse
 
@@ -176,13 +239,19 @@ mcp.pappers.fr/{API_KEY}
 7. **Path filtering Railway repoTriggers** pour économiser les
    redeploys doc-only (cf. `docs/deployment.md` annexe). ~5 min via
    GraphQL.
-8. ~~**Brief vocal ElevenLabs** (S10)~~ — **pivoté en S10 v2 voice mode
-   conversationnel Eleven Agents** (custom LLM SSE + ASR + TTS streaming).
-   Dev done 2026-04-27, activable à chaud via `ENABLE_VOICE_MODE=true` +
-   création d'un Eleven Agent dans le dashboard ElevenLabs (cf.
+8. ~~**Brief vocal ElevenLabs** (S10)~~ — **livré en S10 sous forme de
+   voice mode conversationnel duplex Eleven Agents** (custom LLM SSE +
+   ASR + TTS streaming + narration tool steps). POC end-to-end validé
+   2026-04-27 sur l'API ``simulate-conversation`` ElevenLabs. Pivot
+   acté après lecture détaillée de la doc Eleven Agents : pour le
+   même budget (~3 $ sur le week-end) et sans toucher la logique
+   agent, on passe d'un brief radio TTS post-réponse à un vrai
+   chat-vocal style ChatGPT Voice. Activable à chaud via
+   `ENABLE_VOICE_MODE=true` côté Railway (cf.
    [`docs/deployment.md`](docs/deployment.md) §3 ter). Désactivé par
-   défaut pour ne pas bloquer la démo si l'allocation minutes Eleven
-   Agents du tier `growing_business` n'est pas encore tranchée.
+   défaut côté prod pour cadrer la consommation de minutes Eleven
+   Agents (tier `growing_business`) — le chat texte reste 100 %
+   fonctionnel et constitue le chemin nominal de l'évaluation.
 
 ## Licence
 

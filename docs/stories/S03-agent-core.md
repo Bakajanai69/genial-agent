@@ -223,7 +223,10 @@ requêtes". Résolu ainsi :
   `"any"` forcerait un tool même sur "bonjour ?". Le system prompt
   fait le taf d'inciter Pappers.
 - **Tour 2+ (après un tool_result)** : `tool_choice={"type": "auto"}`.
-  Laisser Claude décider s'il continue (enchaînement U3) ou conclut.
+  Stratégie retenue : laisser le modèle décider en autonomie s'il
+  enchaîne un autre tool call (cas U3) ou s'il conclut. Forcer
+  ``"any"`` ici provoquait des appels parasites sur les questions
+  où le tour 1 suffisait déjà à répondre.
 - **Next step (post-MVP)** : détection keyword (entreprise ou SIREN
   dans la query) → `tool_choice={"type": "any"}` au premier call.
   Bénéfice marginal, hors scope MVP.

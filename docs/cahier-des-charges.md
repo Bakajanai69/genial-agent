@@ -179,12 +179,30 @@ Mauvais trade-off latence.
      la philosophie cap dur tout en laissant une marge réaliste.
    - **Wall-clock** révisé en deux itérations 15 → 30 → 60 s
      (review S08 §B1bis). 30 s flapait encore en webapp prod parce
-     que **Anthropic prompt caching n'est pas activé** côté
-     ``agent.py``, ce qui fait exploser le TTFT du 3ème round U3
+     que l'Anthropic prompt caching n'était pas encore activé côté
+     ``agent.py``, ce qui faisait exploser le TTFT du 3ème round U3
      (contexte cumulé ~50-60 K tokens : 2 entités × 3 ans de bilans).
-     60 s couvre le worst case mesuré. Vrai fix produit
-     (prompt caching) listé en next-step S09 — il couperait le TTFT
-     5-10× et permettrait de revenir à 30 s.
+     60 s couvre le worst case mesuré, et garde une marge même après
+     livraison du prompt caching pour absorber les pointes Anthropic.
+   - **Cap-as-UX-event** (S09.7) : un cap qui se déclenche n'est plus
+     un dead-end conversationnel. Le pipeline émet un event
+     ``cap_continuation_proposed`` qui propose côté UI Chainlit deux
+     actions explicites — « 🔄 Continuer » (relance avec
+     ``ConversationState`` préservé, Payload Vault inclus) ou
+     « 📋 Synthèse partielle » (Sonnet condense les tool results déjà
+     accumulés). Architecture détaillée dans
+     [`docs/stories/S09.7-extraction-robustness-and-cap-ux.md`](./stories/S09.7-extraction-robustness-and-cap-ux.md)
+     §"Cap-as-UX-event".
+
+> **Note post-livraison** : l'Anthropic prompt caching évoqué ci-dessus
+> a été livré dans **S09.7** via `cache_control: ephemeral` posé sur
+> tools + system + messages[-1] dans
+> [`agent.py:run_turn`](../src/genial_agent/agent.py). Les compteurs
+> ``anthropic_cache_creation_tokens`` / ``anthropic_cache_read_tokens``
+> exposés dans `/stats` mesurent le ROI en continu. Le cap wall-clock
+> est resté à 60 s (filet de sécurité conservateur) ; ``MAX_TOKENS_PER_SESSION``
+> a été remonté 80 K → 200 K pour s'aligner sur la context window
+> Sonnet 4.6 sans exploser la facturation.
 
 L'UI affiche quel modèle a servi la réponse finale
 (badge `⚡ Haiku` ou `🧠 Sonnet`), y compris en cas d'escalade
@@ -203,22 +221,41 @@ dur est le filet ultime. Overhead ~0 ms sur le chemin court.
 - Cache applicatif : clé = `(tool_name, args_hash)`, TTL 24 h, couvre les
   3 entreprises des tests officiels (LVMH, BNP, Carrefour) pour protéger
   les crédits en dev.
-- **Gestion des payloads volumineux** : le dogfooding S09 (cf.
+- **Gestion des payloads volumineux (Payload Vault, S09.5)** : le
+  dogfooding S09 (cf.
   [`docs/inspection-mcp-vs-agent.md`](./inspection-mcp-vs-agent.md))
   a révélé que 3 outils Pappers sur 5 testables (`comptes-entreprise`,
   `recherche-dirigeants`, `cartographie-entreprise`) retournent
   systématiquement des payloads largement supérieurs à la borne agent
-  ``_TOOL_RESULT_MAX_CHARS=16_000`` (jusqu'à 706 K chars sur Carrefour
-  Hyper). La troncature actuelle (coupe par caractères avec délimiteur
-  propre) fait perdre les bilans récents et tronque les listes de
-  mandats — cf. story dédiée
-  [`docs/stories/S09.5-mcp-payload-handling.md`](./stories/S09.5-mcp-payload-handling.md)
-  pour le choix d'approche (programmatic tool calling Anthropic,
-  filesystem offload Deep Agents, sub-agent synthesizer, wrapper
-  déterministe per-tool, ou hybride). L'agent **a conscience** de la
-  troncature et le signale plutôt que d'inventer — la robustesse
-  comportementale est intacte, c'est la **complétude** des réponses
-  qui doit être améliorée.
+  ``_TOOL_RESULT_MAX_CHARS=16_000`` (jusqu'à **706 K chars** sur
+  Carrefour Hyper — bilans archivés depuis 2007). Premier garde-fou
+  S05 : troncature déterministe avec délimiteur propre + l'agent
+  **a conscience** de la troncature et la signale plutôt que d'inventer
+  (robustesse comportementale intacte). Mais la **complétude** des
+  réponses était dégradée : le bilan 2024 d'une grande enseigne ne
+  passait jamais le filtre, l'agent répondait sur 2016.
+
+  **Approche retenue après comparaison** des 5 options (programmatic
+  tool calling Anthropic, filesystem offload Deep Agents, sub-agent
+  synthesizer, wrapper déterministe per-tool, ou hybride) :
+  ➜ **offload générique session-scoped** ([`payload_vault.py`](../src/genial_agent/payload_vault.py)).
+  Tout payload MCP > 12 K chars est rangé dans un vault in-memory
+  attaché au `ConversationState` ; l'agent reçoit un index JSON
+  compact (clé d'entrée + cardinalités + chemins jsonpath candidats)
+  et ré-interroge à la demande via deux tools locaux
+  ``payload_inspect(path)`` et ``payload_search(jsonpath)``. Le
+  raisonnement métier (Pappers → français → réponse sourcée) reste
+  intact, on a juste donné à l'agent un mécanisme générique pour
+  naviguer un gros JSON sans le saturer.
+
+  S09.7 a durci ce mécanisme avec : (i) wildcards jsonpath-ng,
+  (ii) auto-continuation après ``payload_inspect`` quand la sous-arborescence
+  est elle-même volumineuse, (iii) cap RAM par session pour éviter
+  qu'un vault ne grossisse indéfiniment, (iv) un envelope footer
+  ``remaining_chars=N`` pour signaler la troncature à l'agent.
+
+  Tableau avant/après et benchmark détaillé : section "Après S09.5"
+  de [`docs/inspection-mcp-vs-agent.md`](./inspection-mcp-vs-agent.md).
 
 ### 5.5 Système de prompt
 
@@ -353,6 +390,12 @@ La démo doit, dans l'ordre, rendre **visible** les éléments suivants :
 | L9 | Endpoint `/health` + keep-alive UptimeRobot configuré | Railway |
 | L10 | Loom 2 min de démo (backup en cas de panne live) | lien dans le README |
 | L11 | Screenshots des scénarios clés | `docs/demo-screenshots/` |
+| L12 | Pack adversarial 10 prompts avec rapport markdown auto-généré | `docs/adversarial-run.md` |
+| L13 | Payload Vault + tools locaux ``payload_inspect`` / ``payload_search`` (S09.5) | `src/genial_agent/payload_vault.py` |
+| L14 | Cache disque Pappers persistant (4 entités × 3 ans pré-warmées) + bake Docker + volume Railway (S09.6) | `data/mcp_cache.json` + `docker/entrypoint.sh` |
+| L15 | Persistance conversations Chainlit (sidebar threads cross-session) (S09.6) | `data/cl_threads.db` (volume Railway) |
+| L16 | Cap-as-UX-event + auto-continuation Vault + jsonpath-ng wildcards (S09.7) | `src/genial_agent/guardrails/caps.py` + `payload_vault.py` |
+| L17 | Voice mode conversationnel Eleven Agents (custom LLM SSE + narration tool steps) (S10) | `src/genial_agent/voice/` |
 
 ---
 
@@ -465,6 +508,127 @@ L'exercice est livrable le dimanche soir si, et seulement si :
 - [ ] Aucun log ne contient l'URL MCP Pappers complète.
 - [ ] Le repo est poussé sur GitHub sur la branche
       `claude/builder-evaluation-exercise-34Iyu`.
+
+---
+
+## 13 bis. Évolution post-MVP — chronologie d'implémentation
+
+Cette section trace la chronologie réelle des décisions et arbitrages
+faits **après** le MVP samedi soir. Les §1 à §13 figent la spec
+d'origine ; tout ce qui suit est une consolidation rétrospective des
+stories S09.5 → S10 pour qu'un lecteur tiers comprenne **pourquoi**
+chaque chantier post-MVP a été ouvert, dans quel ordre, et avec
+quelles contraintes.
+
+> Détail granulaire (problèmes rencontrés, hypothèses testées, hotfixes
+> appliqués) dans les fichiers `docs/stories/S0x-*.md` correspondants.
+> Cette section n'a vocation qu'à donner la vue d'ensemble.
+
+### 13 bis.1 Dimanche matin (S09 polish + dogfooding)
+
+**Décision** : avant d'enregistrer le Loom, faire un dogfooding
+exhaustif sur l'URL Railway prod (5 entités golden × 8 questions
+métier), puis traiter le pack adversarial.
+
+**Observation déclenchante** : sur U3 « Compare santé financière
+Carrefour vs Casino sur 3 ans », l'agent renvoie systématiquement les
+chiffres 2016 au lieu de 2024. Inspection des traces (`traces/*.jsonl`) :
+le tool ``comptes-entreprise`` retourne 706 K chars sur Carrefour Hyper,
+la troncature S05 coupe pile au milieu du bilan 2017 → l'agent ne **voit**
+jamais 2024. Robustesse comportementale OK (il ne hallucine pas), mais
+complétude dégradée.
+
+**Conséquence** : ouverture **S09.5 — Gestion robuste des payloads MCP
+volumineux**. Évaluation comparative de 5 patterns (programmatic tool
+calling, filesystem offload Deep Agents, sub-agent synthesizer,
+wrapper déterministe per-tool, hybride). Choix retenu : **offload
+générique session-scoped** (Payload Vault + 2 tools locaux
+``payload_inspect`` / ``payload_search``). Justification : générique,
+indépendant de la structure interne des tools Pappers, scope
+in-memory donc pas de surface d'attaque persistante, métier inchangé.
+
+### 13 bis.2 Dimanche après-midi (S09.6 — fiabilité Pappers PAYG)
+
+**Observation déclenchante** : pendant les retests post-S09.5, le tool
+``comptes-entreprise`` se met à refuser les jetons Pay-As-You-Go par
+intermittence avec un 500 serveur Pappers. Ticket ouvert côté Pappers
+2026-04-25 ; pas de fix attendu sous 24 h. La démo dimanche soir doit
+fonctionner même avec abo épuisé.
+
+**Conséquence** : ouverture **S09.6 — Workaround tools MCP & cache
+crédits persistant**. Trois axes :
+
+1. **Cache disque baked dans Docker** (``data/mcp_cache.json`` committé)
+   + volume Railway persistant ``/data`` → 4 entités golden × 3 années
+   pré-warmées hors crédits, TTL 7 j.
+2. **Fallback automatique côté agent** : si cache miss + abo épuisé,
+   retour d'un ``workaround_hint`` qui dirige Claude vers
+   ``recherche-entreprises`` (CA / résultat headline en 1 crédit PAYG)
+   ou un refus poli sourcé.
+3. **Persistance conversations Chainlit** (data layer SQLite anonyme
+   ``data/cl_threads.db``) — la sidebar threads survit aux redémarrages
+   serveur. Effet de bord : revoir le footer RGPD §16.4.
+
+### 13 bis.3 Lundi (S09.7 — robustesse extraction + cap UX)
+
+**Observations déclenchantes accumulées** au fil des retests S09.5 +
+S09.6 :
+
+- Les chemins jsonpath naïfs (`$.bilans[0]`) ne suffisent pas pour la
+  navigation vault : les payloads Pappers ont des structures
+  hétérogènes (listes nues, dict imbriqués, clés à indices variables).
+- Sur U3 long avec multi-turns enchaînés, le cap wall-clock 60 s peut
+  finir par se déclencher → l'utilisateur voit un « run interrompu »
+  brut, sans option pour continuer.
+- Le footer mentionnait un envelope tronqué sans donner à l'agent
+  l'info ``remaining_chars`` → tendance à la sur-troncature.
+
+**Conséquence** : ouverture **S09.7 — Robustesse extraction MCP &
+UX des caps**. Quatre chantiers :
+
+1. **jsonpath-ng wildcards** (`$.bilans[*].annee`) avec cap RAM par
+   session pour ne pas faire grossir un vault indéfiniment.
+2. **Anthropic prompt caching** (`cache_control: ephemeral` sur tools
+   + system + messages[-1]) → permet le bump
+   ``MAX_TOKENS_PER_SESSION`` 80 K → 200 K en s'alignant sur la context
+   window Sonnet 4.6.
+3. **Cap-as-UX-event** : tout cap émet ``cap_continuation_proposed`` ;
+   la UI Chainlit propose « 🔄 Continuer » / « 📋 Synthèse partielle »
+   plutôt qu'un dead-end.
+4. **Auto-continuation après ``payload_inspect``** quand la
+   sous-arborescence retournée est elle-même volumineuse (UX :
+   plus besoin pour l'agent d'enchaîner 3 ``payload_inspect``
+   manuels pour atteindre une feuille).
+
+S09.7 a accumulé **18 hotfixes / improvements live** entre dev done et
+review approved, principalement sur l'UI Chainlit (FOUC, splash, sidebar
+threads, cookie owner_id, anti-zigzag visuel) — détail dans la story
+correspondante §"Journal phase 2".
+
+### 13 bis.4 S10 — Stretch voice mode
+
+**Décision initiale (samedi)** : si gating §19.1 vert, livrer un brief
+vocal radio (TTS post-réponse, ~30 s) via ElevenLabs.
+
+**Pivot dimanche soir 2026-04-26** : lecture détaillée de la doc Eleven
+Agents (Conversational AI). Constat : la stack qu'ElevenLabs publie
+gratuitement (ASR + turn-taking propriétaire + TTS streaming + custom
+LLM SSE) permet un **vrai voice mode conversationnel duplex** style
+ChatGPT Voice, pour le même budget (~3 $ sur le week-end) et sans
+toucher la logique agent. Pivot acté : **brief vocal v1** abandonné,
+remplacé par **voice mode v2 Eleven Agents**.
+
+**Architecture** (cf. §19) : agent Genial **100 % inchangé** côté logique
+(MCP, vault, caps, routing) ; voice mode est une couche I/O wrapper
+(`voice/`) qui adapte OpenAI ↔ Anthropic, injecte un suffixe
+voice-friendly au system prompt, génère du SSE OpenAI Chat Completions,
+et émet des chunks narratifs sur les events ``tool_use`` pour combler
+les latences U3.
+
+**POC end-to-end validé 2026-04-27** depuis l'API
+``simulate-conversation`` ElevenLabs → ngrok local → Chainlit voice
+mode v2. Désactivable à chaud via ``ENABLE_VOICE_MODE=false`` (l'endpoint
+n'est même pas monté côté serveur — défense en profondeur).
 
 ---
 
@@ -658,15 +822,22 @@ Chiffrage rapide :
 - Plan Pappers de base : ~1000 crédits / mois.
 - Un tour agent type U3 (comparaison) = ~6–8 appels MCP = ~10 crédits
   moyens.
-- Pour tenir le week-end, on se fixe **un cap journalier de 100
-  crédits** (marge large pour Fabien + son équipe + nos tests).
+- Pour tenir le week-end, cap journalier fixé à **100 crédits** (marge
+  large pour Fabien + son équipe + nos tests).
 
-**Mitigations** :
-- Compteur en mémoire : si >100 appels MCP dans la journée → mode
-  cache-only pour les 3 entités de test, message d'avertissement
-  transparent.
-- Au démarrage, vérifier via l'API Pappers (si endpoint crédits
-  disponible, sinon tracking applicatif seul) le solde restant.
+**Mitigations livrées** :
+- ``observability/credit_guard.degraded()`` (S07) : compteur en mémoire
+  alimenté par ``stats.pappers_calls_today()`` ; dès que
+  ``DAILY_PAPPERS_CREDITS_CAP`` est atteint → mode cache-only sur les
+  entités golden, message dégradé en UI.
+- **Cache disque persistant** (S09.6) : 4 entités golden × 3 années
+  pré-warmées dans ``data/mcp_cache.json`` baked Docker + volume
+  Railway. La démo U3 fonctionne sans dépendre du solde abo.
+- **Workaround tool ``comptes-entreprise``** (S09.6) : si le tool
+  refuse les jetons PAYG (bug serveur Pappers documenté §4.2 de
+  `docs/pappers-mcp.md`), retour d'un ``workaround_hint`` qui
+  redirige Claude vers ``recherche-entreprises`` (1 crédit PAYG)
+  ou un refus poli sourcé.
 
 ### 17.3 Observabilité minimum viable
 

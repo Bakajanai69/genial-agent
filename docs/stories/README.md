@@ -223,19 +223,31 @@ opérationnelles.
 |---|---|---|---|---|
 | S01 | [Scaffold repo](./S01-scaffold.md) | ✅ approved | — | — |
 | S02 | [Client MCP Pappers](./S02-mcp-pappers.md) | ✅ approved | S01 | — |
-| S03 | [Agent Claude core](./S03-agent-core.md) | ✅ approved | S02 | — |
-| S04 | [Routing Haiku↔Sonnet](./S04-routing.md) | 🟡 en cours (dev done) | S03 | — |
-| S05 | [Garde-fous 6 couches](./S05-guardrails.md) | 🟡 en cours (dev done) | S03 | S06 |
-| S06 | [UI Chainlit](./S06-chainlit-ui.md) | 🟡 en cours (dev done) | S03 | S05 |
-| S07 | [Observabilité + healthcheck](./S07-observability.md) | 🟡 en cours (dev done) | S01, S03 | S08 |
-| S08 | [Déploiement Railway](./S08-deployment.md) | ✅ approved | S01, S07 | S07 |
-| S09 | [Polish : README, EVALUATION, Loom](./S09-polish.md) | 🟡 en cours (dev done) | S04, S05, S06, S08 | — |
-| S09.5 | [Gestion robuste des payloads MCP volumineux](./S09.5-mcp-payload-handling.md) | 🟡 en cours (dev done + review fixes) | S09 (dogfooding) | — |
-| S09.6 | [Workaround tools MCP & cache crédits persistant (+ persistance conversations)](./S09.6-mcp-workaround-and-credit-cache.md) | 🟡 phase 2 dev done (review pending) | S09.5 (post-livraison) | — |
-| S09.7 | [Robustesse extraction MCP & UX des caps](./S09.7-extraction-robustness-and-cap-ux.md) | 🟡 dev done 2026-04-26 + 18 hotfixes/improvements live (review pending) | S09.5, S09.6 | — |
-| S10 | [🎯 Stretch : voice mode Eleven Agents](./S10-voice-brief.md) | 🟡 dev done + 5 hotfixes POC live 2026-04-27 (review pending) | S09 | — |
+| S03 | [Agent Claude core](./S03-agent-core.md) | ✅ approved (review fix) | S02 | — |
+| S04 | [Routing Haiku↔Sonnet](./S04-routing.md) | ✅ approved (review fix) | S03 | — |
+| S05 | [Garde-fous 6 couches](./S05-guardrails.md) | ✅ approved (review fix + live E2E) | S03 | S06 |
+| S06 | [UI Chainlit](./S06-chainlit-ui.md) | ✅ approved (review fix) | S03 | S05 |
+| S07 | [Observabilité + healthcheck](./S07-observability.md) | ✅ approved (review fix) | S01, S03 | S08 |
+| S08 | [Déploiement Railway](./S08-deployment.md) | ✅ approved (review fix B1bis iter.2) | S01, S07 | S07 |
+| S09 | [Polish : README, EVALUATION, Loom](./S09-polish.md) | ✅ approved (review fix adversarial T7/T9/T10) | S04, S05, S06, S08 | — |
+| S09.5 | [Gestion robuste des payloads MCP volumineux](./S09.5-mcp-payload-handling.md) | ✅ dev done + review fixes (rouverte suite au dogfooding S09) | S09 (dogfooding) | — |
+| S09.6 | [Workaround tools MCP & cache crédits persistant (+ persistance conversations)](./S09.6-mcp-workaround-and-credit-cache.md) | ✅ phase 2 dev done — robustesse Pappers PAYG + persistance SQLite conversations | S09.5 (post-livraison) | — |
+| S09.7 | [Robustesse extraction MCP & UX des caps](./S09.7-extraction-robustness-and-cap-ux.md) | ✅ dev done + review adversarial fixes (RAM cap, cookie Secure, KPI gaps) ; 18 hotfixes/improvements live 2026-04-26 | S09.5, S09.6 | — |
+| S10 | [🎯 Stretch : voice mode Eleven Agents](./S10-voice-brief.md) | ✅ dev done + 5 hotfixes POC live + review adversarial fixes (input caps, Pass 2 cancellation, obs) — POC end-to-end validé 2026-04-27 | S09 | — |
 
 **Légende** : ⬜ à faire · 🟡 en cours · ✅ approuvée · ⏸ bloquée
+
+> **Note de chronologie** : les stories servent à la fois de **plan
+> d'implémentation** (rédigé en phase elicitation, avant le code) et de
+> **journal de bord post-implémentation** (sections "phase 2 dev",
+> "phase 3 review", "hotfixes live" enrichies au fil de l'eau). C'est
+> volontaire : un lecteur tiers qui découvre le repo peut suivre la
+> chronologie réelle des décisions, des arbitrages et des incidents
+> rencontrés (p. ex. la rouverture de S09.5 suite au dogfooding S09 qui
+> a révélé les payloads MCP > 700 K chars sur Carrefour, ou le pivot
+> S10 du brief radio vers un voice mode conversationnel après lecture
+> de la doc Eleven Agents). Le détail des décisions est *dans la story
+> du moment*, pas réécrit après coup.
 
 ---
 
