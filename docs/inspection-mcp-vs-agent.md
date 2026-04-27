@@ -264,9 +264,9 @@ réduit la perte d'info.
 |---|---|---|---|
 | F1 | Comptes-entreprise tronqué à 16 K, l'agent voit que les vieux bilans | **Moyen** | Slicing intelligent → next-step #1bis README. Effort 2 h. |
 | F2 | System prompt ne pousse pas à utiliser `annee=` | Faible | Ajouter 1 ligne au prompt. Effort 5 min. |
-| F3 | `sirenisateur(Carrefour)` retourne Hypermarchés SNC, pas la holding SA | UX | L'agent gère bien — propose la bonne alternative. À mettre en valeur dans le Loom comme exemple de "agent qui guide l'utilisateur". |
+| F3 | `sirenisateur(Carrefour)` retourne Hypermarchés SNC, pas la holding SA | UX | L'agent gère bien — propose la bonne alternative. À mettre en valeur en démo comme exemple d'« agent qui guide l'utilisateur ». |
 | F4 | Cartographie-entreprise tronqué 38 % sur LVMH | Faible | Augmenter borne à 32 K pour cet outil spécifique ? À discuter en S11. |
-| F5 | L'agent **dit qu'il ne sait pas** quand il ne peut pas lire — pas d'hallucination | **Excellente** | À mettre en avant dans le Loom comme **différentiant clé** : "agent honnête". |
+| F5 | L'agent **dit qu'il ne sait pas** quand il ne peut pas lire — pas d'hallucination | **Excellente** | À mettre en avant en démo comme **différentiant clé** : « agent honnête ». |
 
 ---
 
@@ -278,7 +278,7 @@ c'est ce qui compte pour un cas enterprise. Sur les questions
 d'identité juridique (LVMH fiche), il livre une réponse
 complète et sourcée.
 
-**Recommandation pour la démo Loom** :
+**Recommandation pour la démo live** (pré-S09.5, contexte historique) :
 
 - Faire la **fiche LVMH** (réponse riche, sourcée, badge Haiku) :
   vitrine.
@@ -288,8 +288,8 @@ complète et sourcée.
   une **comparaison Carrefour vs Casino** (déclenche Sonnet, agent
   propose stratégie multi-step) → c'est plus impressionnant.
 - **Montrer T7 saturation 50 entreprises** : Sonnet explique le
-  cap 7 avec calcul détaillé. Excellent signal "agent qui
-  comprend ses contraintes techniques".
+  cap 7 avec calcul détaillé. Excellent signal « agent qui comprend
+  ses contraintes techniques ».
 
 Ce dogfooding montre que l'agent est **plus mature qu'un POC** —
 il a une auto-conscience de ses limites. C'est un argument fort
@@ -334,14 +334,14 @@ Trace complète : [`traces/S095_iterations.md`](../traces/S095_iterations.md)
 | F4 | Cartographie-entreprise tronqué 38 % sur LVMH | **Résolu** — offload couvre aussi cartographie > 12 K. |
 | F5 | Agent transparent quand il ne sait pas | **Préservé** — le pattern "je n'invente pas" survit, juste avec moins de cas où l'agent doit avouer. |
 
-### Recommandation Loom révisée
+### Recommandation démo révisée (post-S09.5)
 
 Le finding F5 reste un différentiant fort : l'agent dit *« je n'ai
 pas trouvé X »* quand Pappers ne couvre pas. **L'agent dit moins
 souvent qu'il a "tronqué" maintenant** — c'est une amélioration de
 fond.
 
-À montrer en plus dans le Loom :
+À montrer en plus en démo live :
 - **G1 Carrefour CA** (CA récent + date + source) — désormais propre.
 - **G3 comparaison Carrefour vs Casino sur 3 ans** — multi-année
   fonctionnel grâce à l'offload + lookups ciblés par année.

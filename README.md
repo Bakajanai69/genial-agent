@@ -7,11 +7,19 @@ familiales — découpé en 10 stories verticales (S01 → S10) tracées
 dans `docs/stories/`.
 
 🔗 **Démo live** : <https://genial-agent-production.up.railway.app>
-🎬 **Loom 2 min** : *à enregistrer avant l'envoi au CTO*
 📦 **Repo** : <https://github.com/Bakajanai69/genial-agent>
 
 [![CI](https://github.com/Bakajanai69/genial-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/Bakajanai69/genial-agent/actions/workflows/ci.yml)
 [![service](https://img.shields.io/website?url=https%3A%2F%2Fgenial-agent-production.up.railway.app%2Fhealth&up_message=online&down_message=offline&label=service)](https://genial-agent-production.up.railway.app/health)
+
+> ⚠️ **Note sur le badge CI** : le quota GitHub Actions de mon compte
+> personnel a été épuisé en cours de week-end (consommé par les
+> nombreux push S08 → S10). Le badge apparaît rouge, mais la suite
+> de tests **passe localement** : 600+ tests, `make test` ✅,
+> `make lint` ✅, `make test-integration` ✅ (live, opt-in). Pour
+> rejouer en local : `make install && make test && make lint`. Le
+> dernier run CI vert est antérieur à l'épuisement du quota et reste
+> visible dans l'historique Actions du repo.
 
 > Le badge `service` reflète uniquement le code HTTP de `/health`
 > (toujours 200 par décision S07). La fiabilité réelle (MCP Pappers

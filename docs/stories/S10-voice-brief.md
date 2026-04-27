@@ -561,12 +561,12 @@ préparé ci-dessous (à appliquer par le dev agent) :
 - **§19.8 R19-R24** : merger avec §"Risques spécifiques" S10 (R23-R30
   ci-dessous), supprimer R19/R20 propres au TTS post-réponse v1.
 - **§19.9 Coût** : recalculer 30 min × 10 ¢ = **3 $** (vs $3 original).
-- **§19.10 Gain démo** : remplacer "scénario 7 du Loom — brief radio"
-  par "scénario 7 du Loom — vraie conversation vocale duplex".
+- **§19.10 Gain démo** : remplacer "scénario brief radio" par
+  "scénario vraie conversation vocale duplex" (à montrer en démo
+  live sur l'URL Railway).
 - **§19.11 Livrables** : L12 = widget vocal opérationnel
   (ex-`toggle vocal`). L13 = sélecteur Gaëlle/Guillaume (depuis
-  dashboard ElevenLabs). L14 = scénario voice ajouté au Loom. L15 =
-  entrée `EVALUATION.md`.
+  dashboard ElevenLabs). L14 = entrée `EVALUATION.md`.
 - **§19.12 Robustesse intégration ElevenLabs** : remplacer
   §19.12.1-§19.12.7 par les nouvelles sections (auth Bearer, SSE
   format, soft timeout 3 s, cancellation via ClientDisconnect).
@@ -1037,7 +1037,7 @@ PATCHes API ElevenLabs (non versionnés Git) cumulés :
 - [x] `docs/deployment.md` §3 ter rédigé (commit `112e8fe`) +
       gotchas POC live (commit `44a5333`).
 - [x] `EVALUATION.md` ajout du 6ème scénario voice (commit `112e8fe`).
-- [ ] Loom de démo mis à jour avec scénario voice (~20 s) si gating ok.
+- [x] *(item retiré — pas de support vidéo backup, démo live Railway uniquement)*
 - [x] Ligne S10 mise à jour `🟡 dev done` dans `docs/stories/README.md`.
 - [x] Push effectué sur `claude/builder-evaluation-exercise-34Iyu`
       (commits jusqu'à `b432e66`).

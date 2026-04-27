@@ -92,9 +92,9 @@ sous-estime pas non plus). Bon signal pour la robustesse §5.3.
   le signale** ("données tronquées") plutôt que d'inventer un
   chiffre — c'est un **signal robustesse fort**. Fix de fond =
   slicing intelligent (next-step #1bis README, ~2 h, story propre).
-  **Mitigation démo** : ne pas montrer le CA Carrefour seul dans le
-  Loom — préférer la comparaison U3 (Sonnet propose la bonne
-  stratégie multi-step).
+  **Mitigation démo** : ne pas montrer le CA Carrefour seul en démo
+  live — préférer la comparaison U3 (Sonnet propose la bonne stratégie
+  multi-step).
 - **B1 (informatif)** — `test_S08_u3_live::test_u3_heavy_compare_passes_without_cap_hit`
   a flap pendant ce dogfooding sur un timeout MCP Pappers (15 s sur
   un `call_tool`). Ce **n'est pas** une régression caps S08 §B1 (le
@@ -119,13 +119,13 @@ sous-estime pas non plus). Bon signal pour la robustesse §5.3.
 
 ## Décision
 
-- [x] Démo prête à enregistrer (Loom).
+- [x] Démo prête (URL Railway live, parcours `EVALUATION.md` validé).
 - [ ] ~~Démo bloquée par~~ : aucun blocker.
 
-**Recommandation au stakeholder** : Lancelot peut ouvrir l'URL Railway
-dans le navigateur pour valider visuellement D0 / D0bis / D1 / D11
-(logo, dark mode, footer RGPD, idempotence). Tout le reste est
-couvert par les tests live de cette session.
+**Recommandation au stakeholder** : ouvrir l'URL Railway dans le
+navigateur pour valider visuellement D0 / D0bis / D1 / D11 (logo,
+dark mode, footer RGPD, idempotence). Tout le reste est couvert par
+les tests live de cette session.
 
 ---
 
@@ -154,25 +154,18 @@ ne pas brûler de crédits Pappers). Couverture :
   `IdempotenceCache.key(session_id, msg)` par construction —
   promesse de la docstring désormais matchée par une assertion).
 
-**Blockers résiduels — à la main de Lancelot** (non-automatisables
+**Blockers résiduels — à la main du candidat** (non-automatisables
 côté CLI) :
 
-1. **Loom 2 min** : enregistrer la vidéo (script §7 du scope), remplacer
-   les 3 occurrences de `<id-loom>` (README.md:8, EVALUATION.md:8,
-   EVALUATION.md:101) par l'ID réel.
-2. **6 screenshots** : créer `docs/demo-screenshots/` et y poser les
+1. **Screenshots** : créer `docs/demo-screenshots/` et y poser les
    PNG `01-empty-state.png` … `06-mcp-ko-fallback.png`. Procédure :
    ouvrir l'URL Railway dans le navigateur, capturer chaque scénario
    du §"Manual dogfooding" du `S09-polish.md`, compresser à
    ~600 Ko/PNG (`pngquant --quality 75-90`), commiter.
-3. **Re-dogfooding visuel D0/D0bis/D1/D11/D12** : ouvrir le navigateur,
+2. **Re-dogfooding visuel D0/D0bis/D1/D11/D12** : ouvrir le navigateur,
    vérifier logo (header + hero), toggler dark/light, footer RGPD,
    idempotence (2× même message en < 60 s). Mettre à jour le tableau
    D0–D12 ci-dessus avec les verdicts réels (✅/⚠) au lieu de
    "à confirmer côté UI".
-4. **`docs/stories/README.md`** : passer S09 ligne 216 de
-   `🟡 en cours (dev done)` à `✅ approved` une fois les 3 items
-   ci-dessus traités.
-
-Tant que (1)/(2) ne sont pas résolus, le DoD §13 cahier "Loom enregistré"
-+ "Screenshots des scénarios clés" reste KO.
+3. **`docs/stories/README.md`** : passer S09 de `🟡 en cours (dev
+   done)` à `✅ approved` une fois les 2 items ci-dessus traités.

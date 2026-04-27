@@ -1,8 +1,8 @@
 """Garde anti-régression sur la doc S09.
 
-Pas de réseau, pas de clé API. Vérifie 5 invariants :
+Pas de réseau, pas de clé API. Vérifie 4 invariants :
 
-1. ``README.md`` mentionne l'URL Railway publique exacte + Loom.
+1. ``README.md`` mentionne l'URL Railway publique exacte.
 2. ``EVALUATION.md`` cite les 5 scénarios attendus.
 3. ``docs/stories/README.md`` ligne S09 → ``✅`` ou encore "à faire".
 4. ``docs/stories/README.md`` ligne S08 → ``✅`` (pas 🟡).
@@ -22,7 +22,6 @@ ROOT = Path(__file__).resolve().parents[2]
 def test_readme_mentions_railway_url() -> None:
     content = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "genial-agent-production.up.railway.app" in content
-    assert "Loom" in content or "loom.com" in content
 
 
 def test_evaluation_md_5_scenarios() -> None:

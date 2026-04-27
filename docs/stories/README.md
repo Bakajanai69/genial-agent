@@ -211,9 +211,6 @@ opérationnelles.
 - [ ] Passer `ENABLE_VOICE_MODE=true` dans `.env` local + Railway
       après merge S10 + gating vert.
 
-### Optionnel
-
-- [ ] Compte Loom (enregistrement démo backup, 2 min).
 
 ---
 
@@ -229,7 +226,7 @@ opérationnelles.
 | S06 | [UI Chainlit](./S06-chainlit-ui.md) | ✅ approved (review fix) | S03 | S05 |
 | S07 | [Observabilité + healthcheck](./S07-observability.md) | ✅ approved (review fix) | S01, S03 | S08 |
 | S08 | [Déploiement Railway](./S08-deployment.md) | ✅ approved (review fix B1bis iter.2) | S01, S07 | S07 |
-| S09 | [Polish : README, EVALUATION, Loom](./S09-polish.md) | ✅ approved (review fix adversarial T7/T9/T10) | S04, S05, S06, S08 | — |
+| S09 | [Polish : README, EVALUATION, pack adversarial, screenshots](./S09-polish.md) | ✅ approved (review fix adversarial T7/T9/T10) | S04, S05, S06, S08 | — |
 | S09.5 | [Gestion robuste des payloads MCP volumineux](./S09.5-mcp-payload-handling.md) | ✅ dev done + review fixes (rouverte suite au dogfooding S09) | S09 (dogfooding) | — |
 | S09.6 | [Workaround tools MCP & cache crédits persistant (+ persistance conversations)](./S09.6-mcp-workaround-and-credit-cache.md) | ✅ phase 2 dev done — robustesse Pappers PAYG + persistance SQLite conversations | S09.5 (post-livraison) | — |
 | S09.7 | [Robustesse extraction MCP & UX des caps](./S09.7-extraction-robustness-and-cap-ux.md) | ✅ dev done + review adversarial fixes (RAM cap, cookie Secure, KPI gaps) ; 18 hotfixes/improvements live 2026-04-26 | S09.5, S09.6 | — |

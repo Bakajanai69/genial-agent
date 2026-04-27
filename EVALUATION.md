@@ -5,7 +5,6 @@
 [![service](https://img.shields.io/website?url=https%3A%2F%2Fgenial-agent-production.up.railway.app%2Fhealth&up_message=online&down_message=offline&label=service)](https://genial-agent-production.up.railway.app/health)
 
 📧 **Feedback** : lancelot.oudin@gmail.com
-🎬 **Loom backup** : *à enregistrer avant l'envoi (lien à insérer ici).*
 
 ---
 
@@ -168,7 +167,6 @@ qu'on attend d'un agent destiné à un client enterprise.
 
 ## Et si ça casse
 
-- 🎬 Loom backup (2 min) : *à insérer avant l'envoi.*
-- 🔁 Local : `git clone … && cp .env.example .env && make install
-  && make run` (clés API à fournir).
-- 📧 Email : lancelot.oudin@gmail.com.
+- 🔁 **Rejouer en local** : `git clone … && cp .env.example .env &&
+  make install && make run` (clés API à fournir, cf. `.env.example`).
+- 📧 **Email** : lancelot.oudin@gmail.com.
