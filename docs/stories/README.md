@@ -166,7 +166,7 @@ opérationnelles.
       5 922 075 chars/mois (largement au-dessus des ~5 000 attendus).
 - [x] Constantes publiques (`ELEVENLABS_VOICE_GAELLE`,
       `ELEVENLABS_VOICE_GUILLAUME`, `ELEVENLABS_MODEL_ID`,
-      `ENABLE_VOICE_BRIEF=false`, `LOG_LEVEL=INFO`) en place.
+      `ENABLE_VOICE_MODE=false`, `LOG_LEVEL=INFO`) en place.
 
 ### ✅ Avant S01 (fondation) — validé 2026-04-24
 
@@ -205,9 +205,9 @@ opérationnelles.
       `python -c "import secrets; print(secrets.token_urlsafe(32))"`)
       + l'enregistrer simultanément dans (a) Workspace Secret
       ElevenLabs, (b) Railway Project Variables, (c) `.env` local.
-- [ ] Renommer `ENABLE_VOICE_BRIEF` → `ENABLE_VOICE_MODE` dans tous
-      les fichiers concernés (cf. liste S10-voice-brief.md
-      §"Inputs utilisateur").
+- [x] Renommé `ENABLE_VOICE_BRIEF` → `ENABLE_VOICE_MODE` dans tous
+      les fichiers concernés (S10 phase 2 dev — config.py, .env.example,
+      cahier-des-charges.md, deployment.md, tests Docker).
 - [ ] Passer `ENABLE_VOICE_MODE=true` dans `.env` local + Railway
       après merge S10 + gating vert.
 
@@ -233,7 +233,7 @@ opérationnelles.
 | S09.5 | [Gestion robuste des payloads MCP volumineux](./S09.5-mcp-payload-handling.md) | 🟡 en cours (dev done + review fixes) | S09 (dogfooding) | — |
 | S09.6 | [Workaround tools MCP & cache crédits persistant (+ persistance conversations)](./S09.6-mcp-workaround-and-credit-cache.md) | 🟡 phase 2 dev done (review pending) | S09.5 (post-livraison) | — |
 | S09.7 | [Robustesse extraction MCP & UX des caps](./S09.7-extraction-robustness-and-cap-ux.md) | 🟡 dev done 2026-04-26 + 18 hotfixes/improvements live (review pending) | S09.5, S09.6 | — |
-| S10 | [🎯 Stretch : brief vocal ElevenLabs](./S10-voice-brief.md) | ⬜ bloqué (gating) | S09 | — |
+| S10 | [🎯 Stretch : voice mode Eleven Agents](./S10-voice-brief.md) | 🟡 dev done 2026-04-27 (gating opérationnel pending) | S09 | — |
 
 **Légende** : ⬜ à faire · 🟡 en cours · ✅ approuvée · ⏸ bloquée
 

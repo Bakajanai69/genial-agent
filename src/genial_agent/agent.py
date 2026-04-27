@@ -320,6 +320,7 @@ async def run_turn(
     max_tokens: int = DEFAULT_MAX_TOKENS,
     temperature: float = DEFAULT_TEMPERATURE,
     tool_choice: dict[str, Any] | None = None,
+    system_prompt_override: str | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """Exécute un tour agent. Yield des events structurés.
 
@@ -335,6 +336,12 @@ async def run_turn(
         tool_choice: override ``{"type": "auto"|"any"|"tool"|"none"}``.
             Default ``{"type": "auto"}`` (cf. S03 elicitation). S04/S05
             peuvent forcer ``any`` pour §7 R9 (trigger Pappers).
+        system_prompt_override: si fourni, remplace ``SYSTEM_PROMPT_AGENT``
+            dans le block system Anthropic. Utilisé par S10 voice mode
+            (``voice_prompt.compose_voice_system_prompt()``) pour
+            injecter le suffixe voice-friendly sans dupliquer le
+            pipeline. **Non-breaking** : default ``None`` = comportement
+            d'origine (cahier §14.3 C2 inchangé).
 
     Yields:
         dict events, schéma :
@@ -395,10 +402,13 @@ async def run_turn(
         # 4096 tokens, Sonnet 4.6 = 2048), Anthropic ignore
         # silencieusement le cache_control — pas d'erreur, juste pas
         # de gain. À mesurer en phase 6.
+        system_text = (
+            system_prompt_override if system_prompt_override is not None else SYSTEM_PROMPT_AGENT
+        )
         system_blocks = [
             {
                 "type": "text",
-                "text": SYSTEM_PROMPT_AGENT,
+                "text": system_text,
                 "cache_control": {"type": "ephemeral"},
             }
         ]

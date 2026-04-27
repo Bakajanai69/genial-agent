@@ -57,11 +57,11 @@ Liste exhaustive — **9 variables**, identiques à `.env` local :
 | -------------------------- | --------------------------------------- | -------------------------------------------------- |
 | `ANTHROPIC_API_KEY`        | `sk-ant-…` (clé prod)                   | Haiku 4.5 + Sonnet 4.6 sur la même clé             |
 | `PAPPERS_API_KEY`          | clé Pappers (handshake MCP)             | URL MCP construite côté serveur                    |
-| `ELEVENLABS_API_KEY`       | clé ElevenLabs                          | Inutilisée tant que `ENABLE_VOICE_BRIEF=false`     |
+| `ELEVENLABS_API_KEY`       | clé ElevenLabs                          | Inutilisée tant que `ENABLE_VOICE_MODE=false`      |
 | `ELEVENLABS_VOICE_GAELLE`  | `tKaoyJLW05zqV0tIH9FD`                  | Config publique, pas un secret                     |
 | `ELEVENLABS_VOICE_GUILLAUME` | `ohItIVrXTBI80RrUECOD`                | Config publique, pas un secret                     |
 | `ELEVENLABS_MODEL_ID`      | `eleven_multilingual_v2`                | Config publique                                    |
-| `ENABLE_VOICE_BRIEF`       | `false`                                 | À flipper `true` après merge S10 + gating §19.1 OK |
+| `ENABLE_VOICE_MODE`        | `false`                                 | À flipper `true` après merge S10 + gating §19.1 OK |
 | `LOG_LEVEL`                | `INFO`                                  | Pour les logs JSON `structlog`                     |
 
 **Optionnel — recommandé en prod** :
@@ -181,6 +181,92 @@ connus puis ré-exécute uniquement les appels PAYG-compatibles. Le
 fichier `data/mcp_cache.json` résultant est committé dans le repo
 (< 1 Mo) → automatiquement copié au prochain build vers le bake →
 disponible au runtime via `bootstrap_volume_from_bake`.
+
+---
+
+## 3 ter. Voice mode S10 — Eleven Agents (custom LLM SSE)
+
+> **Optionnel** — n'activer ce chantier qu'après gating §19.1 (cahier
+> des charges) respecté, MVP texte vert sur l'URL Railway prod.
+
+### Création de l'Eleven Agent
+
+1. ElevenLabs dashboard → [Agents](https://elevenlabs.io/agents) →
+   « Create Agent ».
+2. **Voice** : Gaëlle (`tKaoyJLW05zqV0tIH9FD`). Sélecteur Guillaume
+   gérable plus tard côté dashboard si besoin.
+3. **Language** : `fr`. Override aussi côté widget (`override-language="fr"`).
+4. **LLM** : choisir « **Custom LLM** ».
+   - URL : `https://genial-agent-production.up.railway.app/v1/chat/completions`
+   - Model name : libre (suggéré `genial-agent-claude`).
+   - Headers : ajouter `Authorization` avec value `Bearer ${ELEVEN_AGENT_SHARED_TOKEN}`
+     (le `${...}` pointe sur le Workspace Secret du même nom — voir étape suivante).
+5. **Conversation flow** :
+   - Turn eagerness : **Patient** (laisse le temps de formuler une
+     question complexe U3).
+   - Soft timeout : `timeout_seconds=3.0`,
+     `message="Un instant, je consulte les données…"`,
+     `use_llm_generated_message=false`.
+6. **Security tab** :
+   - Authentication : `disabled` (agent public — la sécurité passe
+     par le Bearer côté custom LLM, pas par le widget).
+   - Allowlist domains :
+     - `genial-agent-production.up.railway.app`
+     - `localhost:8000`
+     - `localhost:8765`
+7. Sauvegarder. Récupérer l'`agent_xxxxxxxxxxxxxxxxxxxxx` depuis l'URL
+   du dashboard.
+
+### Création du Workspace Secret
+
+1. ElevenLabs dashboard → **Workspace → Secrets** → « Add Secret ».
+2. Name : `ELEVEN_AGENT_SHARED_TOKEN`.
+3. Value : générer 32+ chars random :
+
+   ```bash
+   python -c "import secrets; print(secrets.token_urlsafe(32))"
+   ```
+
+   Garder cette valeur — elle ira aussi dans Railway et `.env` local.
+
+### Variables Railway additionnelles (S10)
+
+Dans Railway → Variables :
+
+| Variable                       | Valeur                                       | Notes                                                 |
+| ------------------------------ | -------------------------------------------- | ----------------------------------------------------- |
+| `ENABLE_VOICE_MODE`            | `true` (après gating §19.1 OK ; sinon `false`) | Si `false`, l'endpoint `/v1/chat/completions` n'est même pas monté. |
+| `ELEVEN_AGENT_ID`              | `agent_xxxxxxxxxxxxxxxxxxxxx`                | ID public visible côté widget JS — non-secret.       |
+| `ELEVEN_AGENT_SHARED_TOKEN`    | (la valeur générée à l'étape précédente)     | Bearer comparé timing-safe côté `voice/security.py`. **Strictement secret**. |
+
+> ⚠️ La valeur de `ELEVEN_AGENT_SHARED_TOKEN` doit être **strictement
+> identique** dans : Workspace Secret ElevenLabs, Railway Variables,
+> et `.env` local. Sinon le custom LLM endpoint renvoie 401 et le
+> widget vocal restera silencieux côté navigateur.
+
+### Smoke test post-merge
+
+Après deploy avec `ENABLE_VOICE_MODE=true` :
+
+```bash
+# 1) Vérifier que /voice-meta.html est servi (et contient l'agent-id).
+curl -s https://genial-agent-production.up.railway.app/voice-meta.html | grep "data-agent-id"
+
+# 2) Vérifier que /v1/chat/completions exige l'auth (sans token → 401).
+curl -i -X POST https://genial-agent-production.up.railway.app/v1/chat/completions \
+     -H "Content-Type: application/json" \
+     -d '{"messages":[{"role":"user","content":"ping"}],"stream":true}' | head -5
+# Attendu : HTTP/1.1 401 Unauthorized
+
+# 3) Avec le bon token + Eleven envoie ses chunks. Côté navigateur,
+#    cliquer sur le bouton micro flottant et tester "Donne-moi la
+#    fiche LVMH" en parlant.
+```
+
+Couper le voice mode à chaud si problème en prod : passer
+`ENABLE_VOICE_MODE=false` dans Railway → redeploy automatique → le
+chat texte reste 100 % fonctionnel (le widget JS skippe l'injection
+silencieusement quand `/voice-meta.html` renvoie 404).
 
 ---
 

@@ -156,12 +156,13 @@ custom_css = "/public/footer.css"
 # Specify additional attributes for a custom CSS file
 # custom_css_attributes = "media=\"print\""
 
-# S09.7 hotfix : custom JS qui pose un cookie ``genial_owner_id``
-# (lu/créé depuis localStorage) pour que la sidebar Chainlit conserve
-# l'historique des conversations cross-session (style Claude/ChatGPT).
-# Cf. ``public/owner-cookie.js`` + backend
-# ``ui/chainlit_data_layer.py:_resolve_owner_id``.
-custom_js = "/public/owner-cookie.js"
+# S10 — bootstrap qui (a) préserve intégralement le comportement de
+# ``public/owner-cookie.js`` (cookie ``genial_owner_id`` + splash
+# anti-FOUC, S09.7) et (b) injecte le widget ``<elevenlabs-convai>`` si
+# voice mode est activé côté serveur (fetch ``/voice-meta.html``,
+# 404 = skip silencieux). Chainlit n'autorise qu'un seul ``custom_js``
+# (string, pas array) → fusion forcée dans un unique fichier.
+custom_js = "/public/eleven-widget-bootstrap.js"
 
 # The style of alert boxes. Can be "classic" or "modern".
 alert_style = "classic"

@@ -734,11 +734,21 @@ Fabien puisse tester en 5 min sans poser de question. Contenu cible :
 
 ---
 
-## 19. Stretch — Mode "brief vocal" immersif
+## 19. Stretch — Voice mode conversationnel via Eleven Agents
 
-Feature optionnelle qui ajoute une dimension audio immersive : à chaque
-réponse, un **brief radio de 30–40 secondes** est généré et lu par une
-voix professionnelle française via ElevenLabs.
+Feature optionnelle qui ajoute une dimension audio immersive : un
+**vrai voice mode conversationnel** style ChatGPT Voice. L'utilisateur
+parle, l'agent comprend (ASR ElevenLabs), enchaîne ses tools Pappers,
+répond oralement (TTS Gaëlle/Guillaume) en temps réel, sans bouton
+d'enregistrement manuel.
+
+> **Pivot S10 v2 (2026-04-26)** : la version initiale prévoyait un
+> simple TTS post-réponse (brief radio). On repivote vers une stack
+> **Eleven Agents** (anciennement Conversational AI) — ASR + turn-taking
+> propriétaire + TTS streaming + custom LLM SSE. Notre agent Genial
+> existant reste 100 % inchangé côté logique (MCP Pappers, vault, caps,
+> routing Haiku/Sonnet) — voice mode est une couche I/O. Détails
+> d'implémentation : [`docs/stories/S10-voice-brief.md`](./stories/S10-voice-brief.md).
 
 ### 19.1 Gating (conditions de démarrage)
 
@@ -757,78 +767,89 @@ comme "next step" dans le README. **Pas de négociation sur ce gating**.
 
 ### 19.2 Concept produit
 
-Ni "TTS de la réponse brute" (invivable : lire "SIREN 775670417" à
-voix haute), ni TTS de la chaîne de raisonnement (tool calls sont
-fondamentalement visuels). On produit une **troisième sortie dédiée
-à la voix** : un script narratif court pensé pour l'oreille, style
-news anchor financier.
+Conversation duplex temps réel entre l'utilisateur et l'agent. Pas de
+TTS post-réponse, pas de bouton d'enregistrement manuel : ElevenLabs
+gère le turn-taking via son modèle propriétaire (VAD + analyse
+prosodie / micro-pauses), eagerness configurée à `Patient` pour laisser
+le temps de formuler une question complexe (U3).
 
-Exemple de brief attendu pour la requête "Mandats Bernard Arnault" :
+Côté agent : on **reformate la réponse pour l'oreille** via un suffixe
+au system prompt (`voice_prompt.compose_voice_system_prompt()`) :
 
-> *« Bernard Arnault contrôle actuellement douze mandats en France,
-> dont la présidence de LVMH et du holding familial. Parmi les
-> sociétés notables : Christian Dior SE, Financière Agache, et le
-> Groupe Arnault. Son réseau croise celui de Delphine Arnault sur
-> trois conseils d'administration. Ces données datent du dernier
-> bilan 2023. »*
+- Pas de SIREN à voix haute (la suite de chiffres casse l'oreille).
+- Arrondir les chiffres ("84 milliards d'euros" pas "84,1 Md€").
+- Style narratif fluide, pas de bullet points.
+- Cap ~100-120 mots (~40 s à débit normal).
 
-30 secondes. Pas de SIREN à l'oral. Pas de chiffres à décimales. Une
-narration qu'on peut écouter en voiture ou en préparant un RDV.
+Pendant que l'agent enchaîne ses tool calls Pappers (qui peuvent
+prendre 2-5 s sur U3), un **streaming narratif** émet des chunks
+voice-friendly ("Je cherche le SIREN…", "Je consulte les comptes…")
+pour que ElevenLabs ait du texte à TTS-er en continu — pas de silence
+gênant. Mitigation latence U3.
 
 ### 19.3 Architecture
 
 ```
-User tape "Mandats Bernard Arnault"
-         │
-         ▼
-   Agent (Haiku/Sonnet) + MCP Pappers
-         │
-         ├─ Streaming texte → UI (chemin critique, inchangé)
-         │
-         └─ Réponse structurée complète
-                  │
-                  ▼
-         ┌────────────────────────┐
-         │ Toggle "🔊 Brief vocal"│
-         └────────────────────────┘
-                  │ activé
-                  ▼
-         Briefer Haiku 4.5 (parallèle, non-bloquant)
-         - Input : requête + réponse structurée validée
-         - Output : script narratif ≤ 100 mots, style radio
-                  │
-                  ▼
-         ElevenLabs TTS streaming
-         - Modèle : `eleven_multilingual_v2`
-         - Voix : choix utilisateur Gaëlle / Guillaume
-                  │
-                  ▼
-         Lecteur audio inline Chainlit (`cl.Audio`)
-         + transcription affichée sous le lecteur (accessibilité)
+[mic navigateur]
+    ↓
+[Widget JS ElevenLabs] (embed Chainlit via custom_js)
+    ├── ASR ElevenLabs (FR) → texte transcrit
+    ├── Turn-taking propriétaire (Patient eagerness)
+    └── envoie → POST /v1/chat/completions
+         Headers: Authorization: Bearer $ELEVEN_AGENT_SHARED_TOKEN
+                          ↓
+         [verify_eleven_request middleware]
+         (timing-safe hmac.compare_digest)
+                          ↓
+         [Adapter OpenAI ← → Anthropic]
+         (voice/openai_adapter.py)
+         - convertit messages OpenAI → ConversationState
+         - injecte VOICE_SUFFIX au system prompt
+         - drive run_guarded_turn (agent existant inchangé)
+                          ↓
+         [run_guarded_turn] ← agent existant 100% inchangé
+                          ↓ stream events
+            ┌─────────────┴─────────────┐
+            ↓                           ↓
+    tool_use events             text events finaux
+            ↓                           ↓
+    chunk SSE narratif via      chunk SSE delta.content
+    narrate.py mapping          (verbatim depuis text events)
+            └─────────────┬─────────────┘
+                          ↓
+         Format SSE OpenAI Chat Completions:
+         data: {...delta...}\n\n  ...  data: [DONE]\n\n
+                          ↓
+         [TTS ElevenLabs streaming] (Gaëlle ou Guillaume)
+                          ↓
+[haut-parleur navigateur]
 ```
 
 **Principes clés** :
-- Le brief est **hors chemin critique** : le texte s'affiche toujours
-  en premier, l'audio arrive en parallèle.
-- Le briefer ne reçoit que **la sortie déjà validée** par le
-  validateur déterministe (§14.3 C5) → impossible d'halluciner un
-  SIREN dans le brief.
-- Le script est **toujours affiché en texte** sous le lecteur audio
-  pour WCAG (accessibilité sourds / malentendants). Signal enterprise
-  solide.
+- Notre **agent reste 100 % inchangé** côté logique (tools, MCP, vault,
+  caps, routing Haiku/Sonnet). Voice mode est une couche I/O wrapper.
+- Le **cap dur 60 s wall-clock** côté agent reste actif — si U3 dépasse
+  60 s, le cap-as-UX-event de S09.7 émet une synthèse partielle
+  oralisée. L'utilisateur peut dire "continue" oralement qui
+  repassera par ASR → message standard → relance pipeline.
+- Le **streaming narratif** est généré côté wrapper (pas par le LLM
+  cerveau) à partir des events `tool_use` que `run_guarded_turn` émet.
+- Soft timeout natif ElevenLabs (3 s) avec filler statique FR
+  (*"Un instant, je consulte les données…"*) pour les pauses LLM
+  même si la narration n'a pas encore émis de chunk.
 
 ### 19.4 Décisions produit
 
 | # | Décision | Choix retenu | Raison |
 |---|---|---|---|
-| D1 | État par défaut du toggle | **OFF** | Jamais d'autoplay forcé, UX fondamentale |
-| D2 | Activation | 5ème starter cliquable *"🔊 Active le brief vocal"* + toggle dans settings Chainlit | Découvrable sans être intrusif |
-| D3 | Scope d'application | Toutes les requêtes U1–U5 si toggle ON | Cohérence, pas de règles cachées |
-| D4 | Longueur du script | ≤ 100 mots (~40 s à débit normal) | Budget char ElevenLabs maîtrisé, durée supportable |
-| D5 | Langue du brief | Toujours français | Cohérence avec le scope FR |
-| D6 | Affichage transcription sous l'audio | Toujours | WCAG + signal enterprise |
-| D7 | Cap par session | 20 briefs audio max | Protection crédits ElevenLabs |
-| D8 | Fallback si ElevenLabs KO | Message discret *"mode vocal indispo, texte OK"* | Ne jamais bloquer la réponse principale |
+| D1 | État par défaut | **OFF** (`ENABLE_VOICE_MODE=false`) | Jamais d'autoplay forcé, UX fondamentale |
+| D2 | Activation utilisateur | Bouton micro flottant en bas à droite (widget convai) | Découvrable sans être intrusif |
+| D3 | Scope d'application | Toutes les requêtes U1–U5 quand voice activé | Cohérence, pas de règles cachées |
+| D4 | Longueur réponse vocale | ~100-120 mots (~40 s à débit normal) | Cap dans le system prompt voice-friendly |
+| D5 | Langue de la conversation | Toujours français (`override-language="fr"`) | Cohérence avec le scope FR |
+| D6 | Sourçage à l'oral | Pas de SIREN, pas de date ISO ; *"selon Pappers"*, *"à fin 2024"* | Lecture naturelle, validateur §C5 reste actif |
+| D7 | Cap minutes / session | Configurable côté Eleven dashboard (Quota tab) | Protection crédits ElevenLabs |
+| D8 | Fallback si ElevenLabs KO | Le chat texte Chainlit reste 100 % fonctionnel | Voice mode n'est **jamais** bloquant pour la réponse principale |
 
 ### 19.5 Voix ElevenLabs retenues
 
@@ -847,167 +868,169 @@ User tape "Mandats Bernard Arnault"
 Ajouts `.env.example` :
 
 ```bash
-ELEVENLABS_API_KEY=          # Secret, jamais commit
+ELEVENLABS_API_KEY=          # Secret, jamais commit (TTS classique)
 ELEVENLABS_VOICE_GAELLE=tKaoyJLW05zqV0tIH9FD   # Config
 ELEVENLABS_VOICE_GUILLAUME=ohItIVrXTBI80RrUECOD # Config
 ELEVENLABS_MODEL_ID=eleven_multilingual_v2     # Config
-ENABLE_VOICE_BRIEF=true      # Feature flag global
+ENABLE_VOICE_MODE=true       # Feature flag global voice mode v2
+ELEVEN_AGENT_ID=agent_xxxxxxxxxxxxxxxxxxxxx    # Config (visible widget JS, non-secret)
+ELEVEN_AGENT_SHARED_TOKEN=    # Secret, Bearer custom LLM endpoint
 ```
 
-Comme pour Pappers : clé lue côté serveur uniquement, jamais exposée
-au client, jamais loguée, scrubbing dans les logs applicatifs.
+Comme pour Pappers : clés lues côté serveur uniquement, jamais
+exposées au client. Le `ELEVEN_AGENT_SHARED_TOKEN` est comparé
+timing-safe via `hmac.compare_digest` côté
+[`voice/security.py`](../src/genial_agent/voice/security.py) ; jamais
+loggué (hash tronqué `sha256(token)[:8]` en cas d'audit).
 
-### 19.7 Prompt du briefer Haiku
+### 19.7 Suffixe voice-friendly injecté au system prompt principal
 
-System prompt séparé (single-responsibility, ne contamine pas l'agent
-principal) :
+Pas de Haiku reformulateur (latence cumulée prohibitive +400-600 ms).
+On concatène un suffixe à `SYSTEM_PROMPT_AGENT` quand `voice_mode=on`,
+via [`voice/voice_prompt.py:VOICE_SUFFIX`](../src/genial_agent/voice/voice_prompt.py) :
 
-> *"Tu es un journaliste financier qui rédige un brief audio de 30 à
-> 40 secondes à partir des données fournies. Règles strictes : ne jamais
-> énoncer de SIREN, ne jamais lire un nombre à décimales (arrondir),
-> pas plus de 100 mots, style narratif fluide pour l'oreille, ton
-> neutre et factuel. Utilise des transitions naturelles, pas de
-> bullet points. Conclure par la date du bilan source si pertinent."*
+> *"Mode vocal actif (voice_mode=on). Ta réponse sera lue à voix
+> haute par un système TTS. En conséquence : ne jamais énoncer de
+> SIREN, arrondir tous les chiffres, style narratif fluide, pas de
+> Markdown, transitions naturelles, ~100-120 mots max, sourçage en
+> interne (selon Pappers / à fin 2024), pas de date ISO."*
+
+Le suffixe est **non-mutant** : `SYSTEM_PROMPT_AGENT` reste inchangé,
+seul le pipeline voice mode reçoit la version composée via le paramètre
+`system_prompt_override` propagé à `run_guarded_turn` →
+`run_routed_turn` → `agent.run_turn`.
 
 ### 19.8 Risques spécifiques
 
+Liste consolidée — détails complets et mitigations dans
+[`docs/stories/S10-voice-brief.md`](./stories/S10-voice-brief.md)
+§"Risques spécifiques" (R23-R33).
+
 | # | Risque | Mitigation |
 |---|---|---|
-| R19 | ElevenLabs KO ou crédits épuisés | Fallback silencieux en mode texte + message discret sous le message *"mode vocal indispo"* |
-| R20 | Autoplay Chrome bloqué au 1er visit | L'activation manuelle du toggle par l'utilisateur compte comme interaction → autoplay autorisé pour les briefs suivants |
-| R21 | Clé ElevenLabs fuitée | Même pattern Pappers : env var, jamais log, jamais client-side, scrubbing |
-| R22 | Script TTS hallucine une donnée | Le briefer ne voit que la sortie déjà validée par §14.3 C5, pas de tool calls bruts → impossible |
-| R23 | Latence ElevenLabs > latence texte | Génération en parallèle, audio arrive après le texte, UX reste fluide |
-| R24 | Sur-coût crédits sur démo concurrente | Cap 20 briefs / session + feature flag global désactivable à chaud via env var Railway |
+| R23 | Latence U3 ≥ 60 s tue le voice mode | Streaming narratif tool steps + soft timeout natif Eleven (3 s) ; cap dur 60 s déclenche cap-as-UX-event (S09.7) |
+| R24 | Endpoint custom LLM exposé sans auth → spam crédits | Bearer token timing-safe (`hmac.compare_digest`) + endpoint **non monté** si `ENABLE_VOICE_MODE=false` (défense en profondeur) |
+| R25 | Coût Eleven Agents inattendu (pricing minutes) | 10 ¢/min Pro, 8 ¢/min Business annuel ; cap minutes/jour côté Eleven dashboard ; feature flag désactivable à chaud |
+| R26 | Interruption user ne cancel pas `run_guarded_turn` → orphan tools | Adapter capture `ClientDisconnect`/`CancelledError` → `gen.aclose()` + `state.lock` libéré (pattern S03 éprouvé) |
+| R27 | Widget Eleven incompatible avec CSS Genial | Web Component (Shadow DOM isolé) — pas de bleed CSS attendu |
+| R28 | Auto-play audio bloqué Chrome | Bouton micro = interaction utilisateur explicite → autoplay autorisé pour les chunks suivants |
+| R29 | ASR français de qualité variable | ASR ElevenLabs FR validé en prod ; fallback Plan B (brief vocal v1) si KO |
+| R31 | Tier `growing_business` ne couvre pas Eleven Agents minutes | À vérifier dashboard Usage ; bascule usage-based 3 $ pour 30 min cumul, acceptable |
+| R32 | Domain allowlist trop strict bloque le widget en local | Inclure `localhost:8000`/`8765` + Railway dès la création de l'agent |
 
 ### 19.9 Coût estimé pour le week-end
 
-- ElevenLabs `multilingual_v2` : ~$0.18 / 1000 chars.
-- 100 mots ≈ 600 chars → **~$0.10 par brief**.
-- Week-end avec 30 briefs (nous + Fabien + équipe) : **~$3**.
-- Négligeable, pas de surveillance budgétaire complexe nécessaire.
+- **Eleven Agents** : 10 ¢/min Creator/Pro, 8 ¢/min Business annuel.
+- Week-end avec 30 minutes cumulées (nous + Fabien + équipe) : **~3 $**.
+- Anthropic custom LLM (Haiku/Sonnet) : déjà budgeté côté agent normal,
+  voice mode ne double pas la consommation (un tour voice = un tour
+  texte côté brain).
+- Pappers : aucun surcoût direct (mêmes appels qu'en mode texte).
+- Total stretch : **< 5 $** sur le week-end.
 
 ### 19.10 Gain démo attendu
 
-- **Scénario 7 du Loom** : "tape Fiche LVMH avec brief vocal activé,
-  regarde : réponse texte complète à l'écran + voix professionnelle
-  qui te fait un brief radio en 30 s. Parfait pour un commercial qui
-  prépare un RDV en voiture." → 20 s de vidéo, effet différentiant
-  maximal.
-- **Message implicite à Fabien** : "je sais intégrer plusieurs APIs
-  modernes proprement, avec gating et feature flag, sans dégrader
-  l'expérience de base."
+- **Scénario 7 du Loom** : "Clique sur le micro en bas à droite, dis
+  *Donne-moi la fiche de LVMH*. Écoute Gaëlle répondre en français
+  naturel pendant que tu vois la conversation s'écrire à l'écran." →
+  20 s de vidéo, effet différentiant maximal.
+- **Message implicite à Fabien** : "je sais orchestrer une stack agent
+  voice 2026 (ASR + turn-taking + custom LLM SSE + TTS streaming)
+  proprement, avec feature flag et défense en profondeur, sans
+  dégrader l'expérience texte de base."
 
 ### 19.11 Livrables additionnels si §19 activé
 
-- L12 : toggle vocal fonctionnel avec les deux voix.
-- L13 : sélecteur de voix dans les settings Chainlit.
-- L14 : scénario 7 ajouté au Loom.
-- L15 : entrée dédiée dans `EVALUATION.md` ("active le brief vocal et
-  écoute Gaëlle te briefer sur LVMH").
+- L12 : widget vocal opérationnel intégré à Chainlit (bouton micro).
+- L13 : sélecteur de voix Gaëlle/Guillaume (depuis dashboard ElevenLabs).
+- L14 : scénario voice ajouté au Loom.
+- L15 : entrée dédiée dans `EVALUATION.md` ("clique sur le micro, dis
+  '*donne-moi la fiche LVMH*'").
 
 ### 19.12 Robustesse intégration ElevenLabs
 
-Même niveau d'exigence que Pappers et Claude — pas de différence entre
-une API "critique" et une API "bonus". Si on intègre, on intègre
-proprement.
+Même niveau d'exigence que Pappers et Claude.
 
-#### 19.12.1 Idempotence applicative
+#### 19.12.1 Authentification entrante (Bearer timing-safe)
 
-ElevenLabs **ne propose pas** de header `Idempotency-Key` natif
-(contrairement à Stripe). On implémente côté client :
+ElevenLabs envoie `Authorization: Bearer <ELEVEN_AGENT_SHARED_TOKEN>`
+au custom LLM endpoint (token configuré côté Workspace Secret +
+agent settings). Vérifié en `hmac.compare_digest` côté
+[`voice/security.py`](../src/genial_agent/voice/security.py) :
 
-- Clé de cache : `sha256(script_text + voice_id + model_id)`.
-- TTL : 60 s — couvre double-submit, retry navigateur, refresh, spam
-  clic sur "réactive le brief".
-- Un même `(texte, voix)` ne paie qu'une fois dans la fenêtre.
-- En bonus : un brief identique déjà dans le cache **bypasse même
-  l'appel réseau** → latence 0, crédits 0.
+- Token absent / mal-formé / vide / mismatch → 401, body neutre.
+- **Jamais** de log de la valeur reçue — uniquement
+  `voice_auth_attempt_rejected` avec un hash tronqué `sha256[:8]`
+  pour audit.
+- Pas d'IP allowlist (ElevenLabs ne publie pas de plage stable).
+- **Défense en profondeur** : si `ENABLE_VOICE_MODE=false`, l'endpoint
+  n'est même pas monté côté `voice/mount.py` — surface d'attaque nulle.
 
-#### 19.12.2 Streaming
+#### 19.12.2 Format SSE OpenAI Chat Completions
 
-Endpoint retenu : `POST /v1/text-to-speech/{voice_id}/stream` avec
-`output_format=mp3_22050_32` (bon compromis qualité / taille / support
-navigateur).
+Endpoint exposé : `POST /v1/chat/completions`. Renvoie du SSE strict
+OpenAI Chat Completions :
 
-Deux modes possibles :
-
-| Mode | Description | Choix MVP |
-|---|---|---|
-| **Buffer puis play** | On télécharge tout le MP3 (~500 Ko pour 40 s), puis `cl.Audio` le joue | ✅ **Retenu** : simple, robuste, délai 1–2 s acceptable |
-| **Pipe chunks en live** | Proxy qui streame les chunks ElevenLabs vers le navigateur | ❌ Ajoute complexité pour gain marginal sur 40 s d'audio |
-
-Si besoin d'améliorer : basculer en chunk streaming via une route
-FastAPI dédiée (stretch dans le stretch, à documenter seulement).
-
-#### 19.12.3 Retry et backoff
-
-Politique explicite :
-
-- **3 tentatives maximum** sur erreurs transitoires.
-- **Backoff exponentiel** : 0.5 s → 1 s → 2 s.
-- **Pas de retry** sur 4xx logiques (401, 402, 422) — échec immédiat.
-- **Jitter** ±20 % pour éviter les tempêtes de retry synchronisées.
-- Implémentation via `tenacity` (stop after N attempts, wait
-  exponential, retry_if_exception_type).
-
-#### 19.12.4 Mapping des codes erreur
-
-| Code HTTP | Cause | Action agent |
-|---|---|---|
-| 200 | OK | Stream / return bytes |
-| 401 | Clé invalide / révoquée | Log critique, **désactivation immédiate** du toggle pour la session, message utilisateur "mode vocal indisponible" |
-| 402 | Quota crédits épuisé | **Désactivation immédiate** du toggle, bandeau UI "crédits ElevenLabs épuisés, contacte l'admin", pas de retry |
-| 422 | Payload invalide (texte > limite, voice_id inconnu) | Log, tentative de troncation à 500 chars, retry une fois ; si échec persistant, fallback silencieux |
-| 429 | Rate limit | Backoff retry (§19.12.3) |
-| 500 / 502 / 503 / 504 | Erreur serveur | Backoff retry (§19.12.3) |
-| Timeout (> 30 s) | Latence anormale | Abort, message "brief vocal expiré, réessaie" |
-
-Toutes les erreurs sont loggées en structured log avec : `request_id`,
-`voice_id`, `text_length`, `http_status`, `latency_ms`, `retry_count`.
-
-#### 19.12.5 Timeouts
-
-- **Connect timeout** : 5 s.
-- **Read timeout (total)** : 30 s pour un brief de 100 mots maximum.
-- Au-delà : abort propre, fallback silencieux en texte.
-
-#### 19.12.6 Fallback gracieux
-
-Le mode vocal **n'est jamais bloquant** pour la réponse texte. Tout
-échec ElevenLabs :
-
-1. Est loggé avec contexte complet.
-2. Affiche un micro-message discret sous la réponse : *"🔇 brief vocal
-   indisponible cette fois-ci"*.
-3. Préserve la transcription textuelle du brief (elle était générée par
-   Haiku avant l'appel TTS → elle reste affichée).
-4. Ne déclenche pas de retry automatique sur les requêtes suivantes.
-
-Après 3 échecs consécutifs dans une session, le toggle se désactive
-automatiquement avec un message : *"mode vocal temporairement coupé,
-tu peux le réactiver dans les paramètres"*.
-
-#### 19.12.7 Observabilité dédiée
-
-Chaque appel ElevenLabs log :
-
-```python
-logger.info(
-    "elevenlabs_tts",
-    request_id=request_id,
-    session_id=session_id,
-    voice_id=voice_id,
-    voice_name="gaelle" | "guillaume",
-    text_length=len(script),
-    model="eleven_multilingual_v2",
-    http_status=response.status,
-    latency_ms=elapsed,
-    retry_count=n,
-    cached=cache_hit,
-    cost_eur=estimate_cost(text_length),
-)
+```
+data: {"id": "...", "object": "chat.completion.chunk", "model": "...",
+       "choices": [{"delta": {"role": "assistant"}, "index": 0}]}\n\n
+data: {"choices": [{"delta": {"content": "..."}, "index": 0}]}\n\n
+...
+data: {"choices": [{"finish_reason": "stop", "index": 0, "delta": {}}]}\n\n
+data: [DONE]\n\n
 ```
 
-Agrégation dans `/stats` (§17.3) : nombre de briefs générés, cache
-hit rate, coût cumulé, taux d'erreur.
+Headers anti-buffering proxy : `X-Accel-Buffering: no`,
+`Cache-Control: no-cache, no-transform`.
+
+#### 19.12.3 Soft timeout natif ElevenLabs
+
+Configuré côté dashboard : `timeout_seconds=3.0`,
+`message="Un instant, je consulte les données…"`,
+`use_llm_generated_message=false` (latence prédictible, pas de surcoût
+LLM). Si le custom LLM tarde > 3 s sans chunk, ElevenLabs prononce le
+filler statique. En pratique rare grâce au streaming narratif tool
+steps émis dès le 1er `tool_use`.
+
+#### 19.12.4 Cancellation user (interruption)
+
+Quand l'utilisateur parle par-dessus la réponse de l'agent (ou ferme
+l'onglet), ElevenLabs ferme la connexion SSE. Côté serveur :
+
+1. `request.is_disconnected()` détecte la déconnexion → on `break` la
+   boucle de streaming.
+2. `asyncio.CancelledError` levé par Starlette est aussi capturé.
+3. `turn_gen.aclose()` libère `state.lock` (pattern S03 invariant I5
+   éprouvé).
+4. Compteur `voice_cancelled_total` incrémenté pour observabilité.
+
+#### 19.12.5 Streaming narratif tool steps
+
+Mapping ≤ 6 entrées dans
+[`voice/narrate.py`](../src/genial_agent/voice/narrate.py) :
+
+| Tool | Phrase narrative |
+|---|---|
+| `sirenisateur` | *"Je cherche le SIREN…"* |
+| `recherche-entreprises` | *"Je regarde les chiffres clés…"* |
+| `comptes-entreprise` | *"Je consulte les comptes…"* |
+| `recherche-dirigeants` | *"Je vérifie les mandats…"* |
+| `cartographie-entreprise` | *"Je trace la cartographie…"* |
+| `payload_inspect` | *"Je détaille les données…"* |
+
+Mapping **neutre** — aucune entité hardcodée (LVMH, BNP, Carrefour,
+Casino), cohérent avec philosophie S09.7 "agent adaptable".
+
+#### 19.12.6 Observabilité dédiée
+
+5 compteurs `/stats` :
+
+- `voice_sessions_total` : nombre d'appels custom LLM.
+- `voice_custom_llm_calls` : alias (peut diverger si retry).
+- `voice_chars_tts` : caractères cumulés envoyés au TTS Eleven.
+- `voice_narration_chunks_emitted` : nombre de chunks de narration
+  émis (1 par tool_use).
+- `voice_cancelled_total` : interruptions utilisateur.
+
+Les minutes ElevenLabs ne sont **pas** mesurées côté nous — elles sont
+facturées côté dashboard ElevenLabs.

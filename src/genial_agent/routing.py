@@ -180,6 +180,7 @@ ESCALATE_TOOL_SCHEMA: dict[str, Any] = {
 async def run_routed_turn(
     state: ConversationState,
     user_message: str,
+    system_prompt_override: str | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """Exécute un tour agent avec routing Haiku → Sonnet.
 
@@ -269,6 +270,7 @@ async def run_routed_turn(
         user_message,
         tier=initial_tier,
         extra_tools=extra_tools,
+        system_prompt_override=system_prompt_override,
     )
     aiter = gen.__aiter__()
     try:
@@ -394,6 +396,7 @@ async def run_routed_turn(
             "",
             tier=ModelTier.SONNET,
             continuation=True,
+            system_prompt_override=system_prompt_override,
         ):
             yield event
 

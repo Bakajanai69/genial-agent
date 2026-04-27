@@ -176,7 +176,13 @@ mcp.pappers.fr/{API_KEY}
 7. **Path filtering Railway repoTriggers** pour économiser les
    redeploys doc-only (cf. `docs/deployment.md` annexe). ~5 min via
    GraphQL.
-8. **Brief vocal ElevenLabs** (S10) — déclenché si gating §19.1 vert.
+8. ~~**Brief vocal ElevenLabs** (S10)~~ — **pivoté en S10 v2 voice mode
+   conversationnel Eleven Agents** (custom LLM SSE + ASR + TTS streaming).
+   Dev done 2026-04-27, activable à chaud via `ENABLE_VOICE_MODE=true` +
+   création d'un Eleven Agent dans le dashboard ElevenLabs (cf.
+   [`docs/deployment.md`](docs/deployment.md) §3 ter). Désactivé par
+   défaut pour ne pas bloquer la démo si l'allocation minutes Eleven
+   Agents du tier `growing_business` n'est pas encore tranchée.
 
 ## Licence
 

@@ -113,6 +113,7 @@ async def run_guarded_turn(
     state: ConversationState,
     user_message: str,
     session_id: str,
+    system_prompt_override: str | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """Pipeline complet avec les 6 couches garde-fous.
 
@@ -123,6 +124,11 @@ async def run_guarded_turn(
             gate puis wrappé par S03 ``wrap_user_input``).
         session_id: identifiant de session (``cl.user_session.get("id")``
             côté S06) — clef du token budget.
+        system_prompt_override: si fourni, remplace ``SYSTEM_PROMPT_AGENT``
+            au niveau ``agent.run_turn`` (propagé via
+            ``run_routed_turn``). Utilisé par S10 voice mode pour
+            injecter le suffixe voice-friendly. **Non-breaking** :
+            default ``None`` = pipeline d'origine inchangé.
 
     Yields:
         dict events. Superset du contrat S03/S04 + events garde-fous :
@@ -196,7 +202,11 @@ async def run_guarded_turn(
     # inner ``run_turn``.
     while turn_inputs:
         current_message = turn_inputs.pop(0)
-        routed = run_routed_turn(state, current_message)
+        routed = run_routed_turn(
+            state,
+            current_message,
+            system_prompt_override=system_prompt_override,
+        )
         try:
             async for event in routed:
                 # Forward tel quel (superset, pas de mutation).

@@ -57,6 +57,16 @@ class Stats:
     # à partir du 2ème round (cf. story §"Mesure prompt caching").
     anthropic_cache_creation_tokens: int = 0
     anthropic_cache_read_tokens: int = 0
+    # S10 — voice mode (Eleven Agents). Compteurs incrémentés au
+    # call-site dans ``voice/openai_adapter.py`` (cohérent avec la
+    # règle README #3 "compteurs au call-site"). Les minutes audio
+    # ElevenLabs ne sont **pas** mesurées côté nous : ElevenLabs facture
+    # en minutes côté leur dashboard, on ne re-mesure pas.
+    voice_sessions_total: int = 0
+    voice_custom_llm_calls: int = 0
+    voice_chars_tts: int = 0
+    voice_narration_chunks_emitted: int = 0
+    voice_cancelled_total: int = 0
 
 
 _stats = Stats()
@@ -76,6 +86,11 @@ _INCR_FIELDS = frozenset(
         "payload_searches_total",
         "anthropic_cache_creation_tokens",
         "anthropic_cache_read_tokens",
+        "voice_sessions_total",
+        "voice_custom_llm_calls",
+        "voice_chars_tts",
+        "voice_narration_chunks_emitted",
+        "voice_cancelled_total",
     }
 )
 
@@ -121,6 +136,11 @@ def snapshot() -> dict[str, int | str]:
         "payload_searches_total": _stats.payload_searches_total,
         "anthropic_cache_creation_tokens": _stats.anthropic_cache_creation_tokens,
         "anthropic_cache_read_tokens": _stats.anthropic_cache_read_tokens,
+        "voice_sessions_total": _stats.voice_sessions_total,
+        "voice_custom_llm_calls": _stats.voice_custom_llm_calls,
+        "voice_chars_tts": _stats.voice_chars_tts,
+        "voice_narration_chunks_emitted": _stats.voice_narration_chunks_emitted,
+        "voice_cancelled_total": _stats.voice_cancelled_total,
     }
 
 

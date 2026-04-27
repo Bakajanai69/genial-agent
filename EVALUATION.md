@@ -75,6 +75,34 @@ Refus net. Côté pipeline : **input gate C1** détecte le pattern
 `reveal/show + system prompt` (cf. `src/genial_agent/guardrails/input_gate.py`)
 et le message ne descend même pas jusqu'à Claude.
 
+### 6. 🎯 Stretch — voice mode conversationnel (1 min, optionnel)
+
+> Disponible uniquement si `ENABLE_VOICE_MODE=true` côté serveur (cf.
+> [`docs/deployment.md`](docs/deployment.md) §3 ter). Si le bouton
+> micro n'apparaît pas, le voice mode est désactivé — passe au scénario
+> suivant.
+
+Clique sur le **bouton micro flottant en bas à droite** ("Parler à
+l'agent"). Autorise l'accès microphone si demandé par le navigateur.
+
+Dis à voix haute :
+
+> *Donne-moi la fiche de LVMH*
+
+Tu dois entendre la voix de Gaëlle te répondre en français naturel
+pendant que la conversation s'écrit dans le chat. La narration est
+voice-friendly (pas de SIREN à voix haute, chiffres arrondis, ~40 s
+max). Tu peux interrompre l'agent en parlant par-dessus — ElevenLabs
+détecte le turn-taking et coupe proprement.
+
+> Sous le capot : ton audio passe par l'ASR ElevenLabs FR → l'agent
+> Genial reçoit du texte sur son endpoint custom LLM
+> `/v1/chat/completions` (auth Bearer timing-safe) → enchaîne ses
+> tool calls Pappers normaux → renvoie du SSE OpenAI Chat Completions
+> + chunks narratifs ("Je cherche le SIREN…", "Je consulte les
+> comptes…") → ElevenLabs TTS-streame la réponse vers ton haut-parleur.
+> Latence cible end-to-end < 8 s sur une question simple.
+
 ## Ce qu'il faut regarder pour juger
 
 - **Latence** : 1ère réponse < 2 s sur U1 simple, < 6 s sur U3.

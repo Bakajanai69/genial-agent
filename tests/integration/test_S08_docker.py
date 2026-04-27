@@ -71,7 +71,7 @@ def docker_container():
             "-e",
             "LOG_LEVEL=INFO",
             "-e",
-            "ENABLE_VOICE_BRIEF=false",
+            "ENABLE_VOICE_MODE=false",
             IMAGE_TAG,
         ],
         text=True,

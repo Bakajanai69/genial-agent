@@ -69,6 +69,7 @@ from genial_agent.ui.entity_tracker import (  # noqa: E402
 from genial_agent.ui.events import TurnState, dispatch_event  # noqa: E402
 from genial_agent.ui.post_process import linkify_sirens, model_badge  # noqa: E402
 from genial_agent.ui.starters import STARTERS  # noqa: E402
+from genial_agent.voice.mount import mount_voice_routes  # noqa: E402
 
 # S07 — configurer structlog JSON + monter /health et /stats AVANT que
 # Chainlit serve la 1ère requête. Les deux fonctions sont idempotentes
@@ -76,6 +77,10 @@ from genial_agent.ui.starters import STARTERS  # noqa: E402
 # sans effet de bord.
 configure_logging()
 mount_routes()
+# S10 — monter /v1/chat/completions + /voice-meta.html si voice mode
+# activé. **No-op si ``settings.ENABLE_VOICE_MODE`` est faux** (route
+# absente, surface d'attaque nulle).
+mount_voice_routes()
 
 logger = structlog.get_logger(__name__)
 
