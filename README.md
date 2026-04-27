@@ -138,13 +138,13 @@ recommandée pour suivre le cheminement décisionnel :
    Railway → 4 entités golden × 3 ans pré-warmées hors crédits.
    Persistance SQLite des conversations Chainlit (sidebar threads
    cross-session).
-7. **S09.7 (lundi)** — **robustesse extraction + cap UX**.
+7. **S09.7 (dimanche soir)** — **robustesse extraction + cap UX**.
    jsonpath-ng wildcards, prompt caching Anthropic
    (``cache_control: ephemeral`` → bump tokens 80 K → 200 K),
    cap-as-UX-event (« 🔄 Continuer » / « 📋 Synthèse partielle » au
    lieu d'un dead-end), auto-continuation Vault. 18 hotfixes UI/UX
    appliqués live (FOUC, splash, owner_id cookie, anti-zigzag).
-8. **S10 (mardi-mercredi, stretch voice)** — pivot du brief vocal v1
+8. **S10 (lundi, stretch voice)** — pivot du brief vocal v1
    vers un **voice mode conversationnel** Eleven Agents (custom LLM
    SSE + ASR + turn-taking + TTS streaming). L'agent reste 100 %
    inchangé côté logique ; voice mode est une couche I/O wrapper.

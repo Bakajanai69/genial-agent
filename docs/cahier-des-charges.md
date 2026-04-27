@@ -521,7 +521,7 @@ quelles contraintes.
 > appliqués) dans les fichiers `docs/stories/S0x-*.md` correspondants.
 > Cette section n'a vocation qu'à donner la vue d'ensemble.
 
-### 13 bis.1 Dimanche matin (S09 polish + dogfooding)
+### 13 bis.1 Samedi (S09 polish + dogfooding)
 
 **Décision** : avant de figer le repo pour l'envoi, faire un
 dogfooding exhaustif sur l'URL Railway prod (5 entités golden × 8
@@ -535,22 +535,27 @@ la troncature S05 coupe pile au milieu du bilan 2017 → l'agent ne **voit**
 jamais 2024. Robustesse comportementale OK (il ne hallucine pas), mais
 complétude dégradée.
 
-**Conséquence** : ouverture **S09.5 — Gestion robuste des payloads MCP
-volumineux**. Évaluation comparative de 5 patterns (programmatic tool
-calling, filesystem offload Deep Agents, sub-agent synthesizer,
-wrapper déterministe per-tool, hybride). Choix retenu : **offload
-générique session-scoped** (Payload Vault + 2 tools locaux
+**Conséquence** : ouverture de la story **S09.5 — Gestion robuste des
+payloads MCP volumineux**. Évaluation comparative de 5 patterns
+(programmatic tool calling, filesystem offload Deep Agents, sub-agent
+synthesizer, wrapper déterministe per-tool, hybride). Choix retenu :
+**offload générique session-scoped** (Payload Vault + 2 tools locaux
 ``payload_inspect`` / ``payload_search``). Justification : générique,
-indépendant de la structure interne des tools Pappers, scope
-in-memory donc pas de surface d'attaque persistante, métier inchangé.
+indépendant de la structure interne des tools Pappers, scope in-memory
+donc pas de surface d'attaque persistante, métier inchangé.
 
-### 13 bis.2 Dimanche après-midi (S09.6 — fiabilité Pappers PAYG)
+### 13 bis.2 Dimanche matin (S09.5 livré + S09.6 fiabilité Pappers PAYG)
 
-**Observation déclenchante** : pendant les retests post-S09.5, le tool
-``comptes-entreprise`` se met à refuser les jetons Pay-As-You-Go par
-intermittence avec un 500 serveur Pappers. Ticket ouvert côté Pappers
-2026-04-25 ; pas de fix attendu sous 24 h. La démo dimanche soir doit
-fonctionner même avec abo épuisé.
+**S09.5 implémentée** : Payload Vault session-scoped + tools locaux
+livrés. Carrefour CA passe de *« remontent à 2016 »* (incorrect) à
+**11.77 Mds € au bilan clos 31/12/2024**. Pertes effectives sur les
+payloads gros : avant 97.7 % → après 0 %.
+
+**Observation déclenchante S09.6** : pendant les retests post-S09.5,
+le tool ``comptes-entreprise`` se met à refuser les jetons
+Pay-As-You-Go par intermittence avec un 500 serveur Pappers. Ticket
+ouvert côté Pappers 2026-04-25 ; pas de fix attendu sous 24 h. La
+démo doit fonctionner même avec abo épuisé.
 
 **Conséquence** : ouverture **S09.6 — Workaround tools MCP & cache
 crédits persistant**. Trois axes :
@@ -566,7 +571,7 @@ crédits persistant**. Trois axes :
    ``data/cl_threads.db``) — la sidebar threads survit aux redémarrages
    serveur. Effet de bord : revoir le footer RGPD §16.4.
 
-### 13 bis.3 Lundi (S09.7 — robustesse extraction + cap UX)
+### 13 bis.3 Dimanche soir (S09.7 — robustesse extraction + cap UX)
 
 **Observations déclenchantes accumulées** au fil des retests S09.5 +
 S09.6 :
@@ -602,7 +607,7 @@ review approved, principalement sur l'UI Chainlit (FOUC, splash, sidebar
 threads, cookie owner_id, anti-zigzag visuel) — détail dans la story
 correspondante §"Journal phase 2".
 
-### 13 bis.4 S10 — Stretch voice mode
+### 13 bis.4 Lundi (S10 — stretch voice mode)
 
 **Décision initiale (samedi)** : si gating §19.1 vert, livrer un brief
 vocal radio (TTS post-réponse, ~30 s) via ElevenLabs.

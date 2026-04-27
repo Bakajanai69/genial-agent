@@ -1,22 +1,22 @@
 # Workflow Claude Code — méthodologie 3 phases
 
-> Ce document explicite **comment j'utilise Claude Code (CLI Anthropic)
-> sur ce projet**. Il s'adresse à un lecteur (CTO, lead engineer) qui
-> veut comprendre où je trace la ligne entre *« le candidat a réfléchi »*
-> et *« l'outil a généré »*. Spoiler : c'est de la méthodologie, pas du
-> clic-bouton.
+> **Note de rédaction** : ce document est rédigé par Claude (l'assistant
+> IA utilisé sur le projet) à partir de la méthodologie que Lancelot a
+> appliquée tout au long du week-end et qu'il a explicitée en
+> post-livraison. La 3ème personne est volontaire — il s'agit de
+> restituer la méthode telle qu'elle a été pratiquée, pas de s'en
+> attribuer la rédaction.
 >
-> Je l'ai mis à part pour que quiconque arrive sur le repo via le ADR
-> [`docs/architecture-decisions.md`](./architecture-decisions.md) puisse
-> comprendre **dans la même session de lecture** comment ce repo a été
-> produit, sans avoir à chercher.
+> Ce document complète l'ADR
+> [`docs/architecture-decisions.md`](./architecture-decisions.md) :
+> les ADR disent *quoi*, ce document dit *comment*.
 
 ---
 
 ## Pourquoi 3 phases plutôt qu'une session marathon
 
-J'ai construit ce repo en découpant chaque story (S01 → S10) en **3
-sessions Claude Code distinctes** :
+Lancelot a construit ce repo en découpant chaque story (S01 → S10) en
+**3 sessions Claude Code distinctes** :
 
 ```
 Phase 1 (Elicitation) → Phase 2 (Dev) → Phase 3 (Review)
@@ -63,8 +63,8 @@ trous techniques. Vérifier que les SDK / API / patterns évoqués sont
 **Commit final** : `story(Sxx): refine — <résumé>`.
 
 **Sortie attendue** : story dont la phase 2 peut démarrer sans aucune
-question restante. Si une ambiguïté reste, c'est documenté avec un
-TODO explicite et la phase 2 ne démarre pas dessus.
+question restante. Si une ambiguïté reste, elle est documentée avec
+un TODO explicite et la phase 2 ne démarre pas dessus.
 
 ### Phase 2 — Dev
 
@@ -118,15 +118,15 @@ que la méthode est supposée produire.
 
 ---
 
-## Où je tranche, où je laisse l'outil proposer
+## Où Lancelot tranche, où il laisse l'outil proposer
 
-C'est la question la plus importante de ce document. Voici ma
-distribution réelle des décisions sur ce projet :
+C'est la question la plus importante de ce document. Distribution
+réelle des décisions sur le projet :
 
-### Décisions où **je tranche** (pas de délégation)
+### Décisions où Lancelot tranche (pas de délégation)
 
 - **Spec produit** : cahier des charges (`docs/cahier-des-charges.md`)
-  écrit par moi avant la moindre ligne de code. C'est le contrat
+  écrit par Lancelot avant la moindre ligne de code. C'est le contrat
   qu'aucune phase ne peut contourner.
 - **Stack core** : Anthropic SDK + MCP natif, dual modèle Haiku/Sonnet,
   Chainlit, Railway → AWS. Cf. ADR-1 à ADR-6.
@@ -136,34 +136,35 @@ distribution réelle des décisions sur ce projet :
 - **Arbitrages budget** : cap journalier crédits MCP, choix de
   pré-warmer 4 entités golden vs stress test exhaustif, désactivation
   voice mode par défaut côté prod.
-- **Architecture cible AWS** (cf. ADR-6) — j'ai mon SAA, c'est mon
-  terrain.
+- **Architecture cible AWS** (cf. ADR-6).
 
-### Décisions construites **en tandem** (dialogue technique itératif)
+### Décisions construites en tandem (dialogue technique itératif)
 
-- Routing 3 couches (j'ai défini les 3 niveaux, Claude a proposé les
-  patterns regex et le contrat `escalate_to_sonnet`).
-- Découpage des 6 couches de garde-fous (j'ai cadré C1/C5/C6 d'abord
-  dans le cahier, Claude a structuré l'implémentation).
-- Format ADR / format stories — proposé par moi, raffiné par Claude.
+- Routing 3 couches (Lancelot a défini les 3 niveaux, Claude a proposé
+  les patterns regex et le contrat `escalate_to_sonnet`).
+- Découpage des 6 couches de garde-fous (Lancelot a cadré C1/C5/C6
+  d'abord dans le cahier, Claude a structuré l'implémentation).
+- Format ADR / format stories — proposé par Lancelot, raffiné par
+  Claude.
 
-### Décisions où **j'accepte la proposition outil**
+### Décisions où Lancelot accepte la proposition outil
 
-- Wording exact des system prompts (mes contraintes produit, leur
-  formulation).
-- Implémentation du runner adversarial pytest (mon contrat T1-T10,
+- Wording exact des system prompts (ses contraintes produit, leur
+  formulation par Claude).
+- Implémentation du runner adversarial pytest (son contrat T1-T10,
   leur code).
 - Détails Chainlit (hooks, event types, conventions de logging
   `structlog`).
-- Convention de commit conventional-commits (que j'utilise déjà
-  habituellement, mais formalisé par Claude dans le doc).
+- Convention de commit conventional-commits (déjà utilisée
+  habituellement par Lancelot, mais formalisée par Claude dans le
+  doc).
 
 ---
 
 ## Anti-patterns que cette méthode évite
 
-C'est *parce que* j'ai vu ces anti-patterns sur des projets précédents
-(client + autres builders) que je tiens à cette discipline.
+C'est *parce que* Lancelot a vu ces anti-patterns sur des projets
+précédents (clients + autres builders) qu'il tient à cette discipline.
 
 - **One-shot copilot** : *« Claude, écris-moi un agent qui fait X »*.
   Résultat : du code plausible mais qui ignore les contraintes du
@@ -192,14 +193,14 @@ pas** bien :
 
 - **Lente** : chaque story coûte ~3× le temps d'une session unique.
   Sur ce projet, c'était le bon trade-off (qualité > vélocité). Sur
-  un sprint client GENIAL avec deadline serrée, j'ajusterais : phases
+  un sprint client avec deadline serrée, Lancelot ajusterait : phases
   1 et 3 condensées sur les stories simples, méthode complète
   uniquement sur les stories à enjeu (sécurité, perf, integration
   tierce).
 - **Coûteuse en tokens Anthropic** : chaque session fraîche relit le
-  cahier + les sources. Sur du long terme, je couplerais avec
-  l'Anthropic prompt caching côté API (que j'ai justement livré
-  côté agent en S09.7 — cf. ADR-3).
+  cahier + les sources. Sur du long terme, à coupler avec
+  l'Anthropic prompt caching côté API (justement livré côté agent en
+  S09.7 — cf. ADR-3).
 - **Pas miracle** : la phase 3 attrape 80 % des trous, pas 100 %. Un
   pack adversarial dédié (T1-T10 livré ici) reste indispensable pour
   les 20 % restants. Les 2 cas tolérés du pack (T6 entité bidon, T9
@@ -213,20 +214,19 @@ pas** bien :
 
 ---
 
-## Ce que cette méthode dit de moi (en tant que builder)
+## Ce que cette méthode dit du candidat
 
-Je préfère expliciter pour ne pas laisser place à l'interprétation :
+Pour ne pas laisser place à l'interprétation :
 
-- **Je sais utiliser l'IA en outil de production**, pas en gadget. La
-  JD GENIAL parle de *« AI-first problem solver »* et *« daily usage
-  of AI tools »* — c'est exactement ce workflow.
-- **Je trace ce que je décide vs ce que l'outil propose**. Cf. la
-  section "Où je tranche" ci-dessus, et l'ADR
+- **Lancelot sait utiliser l'IA en outil de production**, pas en
+  gadget. La JD GENIAL parle de *« AI-first problem solver »* et
+  *« daily usage of AI tools »* — c'est exactement ce workflow.
+- **Il trace ce qu'il décide vs ce que l'outil propose**. Cf. la
+  section "Où Lancelot tranche" ci-dessus, et l'ADR
   [`docs/architecture-decisions.md`](./architecture-decisions.md)
   qui sépare explicitement les deux.
-- **Je sais où la méthode atteint ses limites**. Cf. section "Limites"
-  ci-dessus.
-- **Je préfère une méthode discutable et explicite à un workflow
-  invisible**. Si vous voulez challenger ce workflow en entretien, j'ai
-  des arguments. Si vous voulez le challenger sur le repo, vous voyez
-  exactement ce qu'il a produit, étape par étape.
+- **Il sait où la méthode atteint ses limites**. Cf. section
+  "Limites" ci-dessus.
+- **Méthode discutable et explicite plutôt qu'un workflow invisible** :
+  les commits `story(Sxx) → feat(Sxx) → review(Sxx)` du git log
+  permettent de remonter chaque ligne de code à sa décision d'origine.
