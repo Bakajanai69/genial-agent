@@ -38,6 +38,7 @@ bootstrap_volume_from_bake()
 
 from genial_agent import mcp_pappers  # noqa: E402
 from genial_agent.agent import ConversationState  # noqa: E402
+from genial_agent.auth.mount import mount_auth_middleware  # noqa: E402
 from genial_agent.config import settings  # noqa: E402
 from genial_agent.guardrails import budget, run_guarded_turn  # noqa: E402
 from genial_agent.guardrails.caps import DAILY_PAPPERS_CREDITS_CAP  # noqa: E402
@@ -77,6 +78,11 @@ from genial_agent.voice.mount import mount_voice_routes  # noqa: E402
 # sans effet de bord.
 configure_logging()
 mount_routes()
+# Pose ``genial_owner_id`` côté serveur dès la 1re requête HTTP, avant
+# que ``header_auth_callback`` ne lise les cookies. Ferme la race
+# condition au 1er pageload où le cookie n'était posé que côté JS et
+# qui rendait orphelins les threads créés sous le fallback ``anon-*``.
+mount_auth_middleware()
 # S10 — monter /v1/chat/completions + /voice-meta.html si voice mode
 # activé. **No-op si ``settings.ENABLE_VOICE_MODE`` est faux** (route
 # absente, surface d'attaque nulle).

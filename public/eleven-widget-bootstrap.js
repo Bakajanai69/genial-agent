@@ -75,6 +75,21 @@
     } catch (e) {
         // localStorage bloqué — UUID éphémère pour cette page.
     }
+    // Fallback cookie : si localStorage est vide mais que le serveur a
+    // déjà posé le cookie ``genial_owner_id`` (cf. middleware backend
+    // ``auth/middleware.py:ensure_owner_cookie_dispatch``), on adopte
+    // cette valeur côté localStorage. Évite de regénérer un UUID qui
+    // écraserait le cookie posé par le serveur.
+    if (!id) {
+        try {
+            const cookieMatch = document.cookie.match(/(?:^|;\s*)genial_owner_id=([A-Za-z0-9-]{8,64})/);
+            if (cookieMatch) {
+                id = cookieMatch[1];
+            }
+        } catch (e) {
+            // Pas d'accès à document.cookie (sandbox extrême).
+        }
+    }
     if (!id) {
         if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
             id = crypto.randomUUID().replaceAll("-", "");
@@ -84,11 +99,11 @@
                 id += Math.floor(Math.random() * 256).toString(16).padStart(2, "0");
             }
         }
-        try {
-            window.localStorage.setItem(KEY, id);
-        } catch (e) {
-            // Best-effort.
-        }
+    }
+    try {
+        window.localStorage.setItem(KEY, id);
+    } catch (e) {
+        // Best-effort.
     }
     const secureFlag = (typeof location !== "undefined" && location.protocol === "https:") ? "; Secure" : "";
     document.cookie = `${KEY}=${id}; path=/; max-age=31536000; SameSite=Lax${secureFlag}`;
