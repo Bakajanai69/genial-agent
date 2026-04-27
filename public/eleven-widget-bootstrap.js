@@ -120,8 +120,12 @@
         document.body.appendChild(widget);
 
         const script = document.createElement("script");
-        // Pin de version (cf. story §"Phase 1" widget customization).
-        script.src = "https://unpkg.com/@elevenlabs/convai-widget-embed@0.5.4";
+        // S10 phase 2 hotfix 2026-04-27 : bump 0.5.4 → 0.11.6.
+        // 0.5.4 (figé en story phase 1) ne capturait pas l'audio mic
+        // côté prod — l'ASR ElevenLabs recevait du silence. Le format
+        // audio / protocol WebSocket a changé entre 0.5.x et 0.11.x.
+        // Validé live : ASR FR fonctionne avec 0.11.6.
+        script.src = "https://unpkg.com/@elevenlabs/convai-widget-embed@0.11.6";
         script.async = true;
         document.body.appendChild(script);
     }
