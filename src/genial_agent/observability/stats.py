@@ -67,6 +67,10 @@ class Stats:
     voice_chars_tts: int = 0
     voice_narration_chunks_emitted: int = 0
     voice_cancelled_total: int = 0
+    # Pass 2 reformulator a échoué (Anthropic 429/503 typique) → fallback
+    # main strippé. Permet de surveiller la santé du Haiku reformulateur
+    # sans inspecter les logs structurés.
+    voice_reformulator_failed: int = 0
 
 
 _stats = Stats()
@@ -91,6 +95,7 @@ _INCR_FIELDS = frozenset(
         "voice_chars_tts",
         "voice_narration_chunks_emitted",
         "voice_cancelled_total",
+        "voice_reformulator_failed",
     }
 )
 
@@ -141,6 +146,7 @@ def snapshot() -> dict[str, int | str]:
         "voice_chars_tts": _stats.voice_chars_tts,
         "voice_narration_chunks_emitted": _stats.voice_narration_chunks_emitted,
         "voice_cancelled_total": _stats.voice_cancelled_total,
+        "voice_reformulator_failed": _stats.voice_reformulator_failed,
     }
 
 

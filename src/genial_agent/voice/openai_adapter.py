@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -75,6 +76,18 @@ _SSE_HEADERS = {
 
 # Default si ``messages[-1]`` n'est pas un user (cas pathologique).
 _FALLBACK_USER_MSG = ""
+
+# Caps adversariaux côté input — défense en profondeur même avec un Bearer
+# valide (Workspace Eleven compromis, dev local malveillant). Les valeurs
+# couvrent largement un usage Eleven Agents normal (historique multi-tour
+# typique = 5-20 messages, body <100 KB).
+_MAX_MESSAGES_PER_REQUEST = 50
+_MAX_BODY_BYTES = 256 * 1024  # 256 KB
+
+# Sanitize ``body["user"]`` (champ OpenAI arbitraire) avant injection en
+# session_id : caractères safe seulement, longueur bornée. Le ``user``
+# Eleven Agents est typiquement un UUID conv → matche largement.
+_SAFE_USER_RE = re.compile(r"^[A-Za-z0-9._\-]{1,128}$")
 
 
 def _convert_history_to_anthropic(
@@ -228,9 +241,20 @@ async def _stream_chat_completion(
     history, last_user_text = _convert_history_to_anthropic(raw_messages)
 
     # session_id pour le token budget : si Eleven envoie un user_id
-    # stable (champ ``user`` standard OpenAI), on l'utilise ; sinon un
-    # UUID éphémère (chaque appel = nouveau budget).
-    session_id = str(body.get("user") or f"voice-{uuid.uuid4().hex}")
+    # stable (champ ``user`` standard OpenAI), on l'utilise sous réserve
+    # qu'il matche ``_SAFE_USER_RE`` (charset alphanum + `._-`, max 128
+    # chars). Sinon → UUID éphémère.
+    #
+    # Pourquoi sanitize : le champ ``user`` OpenAI est arbitraire user-
+    # supplied. Sans guard, un attaquant Bearer peut injecter une clé
+    # collision (vol de bucket budget d'autrui), un control char (log
+    # injection), ou une longueur pathologique (hash map abuse). Même
+    # avec un Bearer valide, on ne fait jamais confiance au payload.
+    raw_user = body.get("user")
+    if isinstance(raw_user, str) and _SAFE_USER_RE.match(raw_user):
+        session_id = raw_user
+    else:
+        session_id = f"voice-{uuid.uuid4().hex}"
 
     # State éphémère par appel — cohérent avec la philosophie
     # "session voice = échange éphémère côté UI" (story §"Compatibilité
@@ -325,7 +349,13 @@ async def _stream_chat_completion(
                     if content:
                         # Buffer pour Pass 2, ne yield PAS direct.
                         main_text_buffer.append(content)
-                        last_event_t = time.monotonic()
+                        # NB: on ne rafraîchit PAS ``last_event_t`` ici.
+                        # Les events ``text`` Pass 1 ne yieldent rien en
+                        # SSE (bufferés pour le reformulateur), donc côté
+                        # widget Eleven le silence persiste. Si on
+                        # rafraîchissait, le filler ne se déclencherait
+                        # jamais pendant que le main LLM stream du texte
+                        # (cf. trace LVMH 7,3 s observée 2026-04-27).
 
                 elif etype == "tool_use":
                     # Narration LIVE (mitigation latence U3).
@@ -353,8 +383,10 @@ async def _stream_chat_completion(
                     break
 
                 elif etype == "capped":
-                    # Cap atteint en cours de turn.
-                    phrase = " (Pause sur le cap.) "
+                    # Cap atteint en cours de turn. Wording sans
+                    # parenthèses ni ponctuation parasite — TTS lit les
+                    # parens à voix haute ("parenthèse ouvrante…").
+                    phrase = "Petite pause, je dois faire le point. "
                     narration_chars += len(phrase)
                     yield _sse_chunk(
                         phrase,
@@ -427,7 +459,21 @@ async def _stream_chat_completion(
                                 chunk_id=chunk_id,
                                 model_label=model_label,
                             )
+                except asyncio.CancelledError:
+                    # B2 — la cancellation Pass 2 (déconnexion détectée
+                    # par Starlette plutôt que via ``is_disconnected``)
+                    # doit incrémenter ``voice_cancelled_total``. Sans
+                    # ce catch, le ``CancelledError`` (PEP 654 : ne dérive
+                    # pas d'``Exception`` en Python 3.8+) bypassait le
+                    # compteur dans le ``finally`` extérieur.
+                    cancelled = True
+                    logger.info(
+                        "voice_reformulator_cancelled",
+                        session_id=session_id,
+                    )
+                    raise  # propagation au finally extérieur (cleanup)
                 except Exception:  # noqa: BLE001 — fallback sur main strippé
+                    stats_incr(voice_reformulator_failed=1)
                     logger.exception(
                         "voice_reformulator_failed_fallback_to_main",
                         session_id=session_id,
@@ -514,6 +560,27 @@ async def chat_completions(request: Request) -> StreamingResponse | JSONResponse
     if auth_response is not None:
         return auth_response
 
+    # B4 — Cap dur sur ``content-length`` : refuse 413 plutôt que charger
+    # un body 100 MB en mémoire avant de parser. Le cap est large par
+    # rapport à un usage Eleven Agents légitime (256 KB couvre 50 messages
+    # × ~5 KB chacun, largement au-dessus du quotidien).
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            cl_int = int(content_length)
+        except ValueError:
+            cl_int = 0
+        if cl_int > _MAX_BODY_BYTES:
+            logger.warning(
+                "voice_chat_completion_body_too_large",
+                content_length=cl_int,
+                cap=_MAX_BODY_BYTES,
+            )
+            return JSONResponse(
+                {"error": {"message": "request body too large", "type": "invalid_request_error"}},
+                status_code=413,
+            )
+
     try:
         body = await request.json()
     except Exception:  # noqa: BLE001 — body invalide → 400
@@ -535,6 +602,26 @@ async def chat_completions(request: Request) -> StreamingResponse | JSONResponse
     if not body.get("stream", False):
         return JSONResponse(
             {"error": {"message": "stream=true required", "type": "invalid_request_error"}},
+            status_code=400,
+        )
+
+    # B3 — Cap dur sur le nombre de messages d'historique. Sans ça, un
+    # Bearer compromis pourrait envoyer 10k messages → DoS LLM tokens.
+    # 50 couvre largement un historique multi-tour Eleven Agents normal.
+    raw_messages = body.get("messages") or []
+    if isinstance(raw_messages, list) and len(raw_messages) > _MAX_MESSAGES_PER_REQUEST:
+        logger.warning(
+            "voice_chat_completion_too_many_messages",
+            count=len(raw_messages),
+            cap=_MAX_MESSAGES_PER_REQUEST,
+        )
+        return JSONResponse(
+            {
+                "error": {
+                    "message": f"too many messages (>{_MAX_MESSAGES_PER_REQUEST})",
+                    "type": "invalid_request_error",
+                }
+            },
             status_code=400,
         )
 

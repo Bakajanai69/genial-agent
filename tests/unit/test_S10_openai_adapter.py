@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 from collections.abc import AsyncIterator
 from typing import Any
@@ -515,3 +517,199 @@ def test_stream_session_id_fallback_uuid() -> None:
 
     assert captured["session_id"].startswith("voice-")
     assert len(captured["session_id"]) > len("voice-")
+
+
+# --------------------------------------------------------------------------- #
+# Review post-S10 — adversarial input (B3/B4/B5) + edge cases
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "unsafe",
+    [
+        "../../../etc/passwd",  # path traversal
+        "evil\nlog injection",  # control char
+        "a" * 200,  # too long
+        "user with space",  # whitespace
+        "<script>",  # html
+        "",  # empty string explicitly
+        12345,  # int
+        None,  # null
+        ["array"],  # array
+    ],
+)
+def test_stream_unsafe_user_field_falls_back_to_uuid(unsafe: Any) -> None:
+    """B5 — ``body["user"]`` user-supplied non conforme → fallback UUID
+    éphémère, pas de poisoning du token budget map."""
+    body: dict[str, Any] = {
+        "messages": [{"role": "user", "content": "Q"}],
+        "stream": True,
+        "user": unsafe,
+    }
+    captured: dict[str, Any] = {}
+
+    def _fake_run(*args: Any, **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
+        captured["session_id"] = args[2]
+        return _events({"type": "text", "content": "ok"})
+
+    with patch.object(openai_adapter, "run_guarded_turn", side_effect=_fake_run):
+        _drain_chunks(_stream_chat_completion(body, _FakeRequest()))
+
+    sid = captured["session_id"]
+    assert sid.startswith("voice-")
+    # Aucune valeur attaquante ne doit fuiter dans la session_id.
+    if isinstance(unsafe, str) and unsafe:
+        assert unsafe not in sid
+
+
+def test_stream_capped_event_yields_voice_friendly_phrase() -> None:
+    """T2 — un event ``capped`` reçu mid-stream produit une phrase
+    voice-friendly sans parenthèses (TTS prononce les parens)."""
+    body = {"messages": [{"role": "user", "content": "Q"}], "stream": True}
+    fake_events = _events(
+        {"type": "capped", "reason_code": "wall_clock", "reason": "60s"},
+        {"type": "text", "content": "Bonus tail."},
+    )
+    with patch.object(openai_adapter, "run_guarded_turn", return_value=fake_events):
+        chunks = _drain_chunks(_stream_chat_completion(body, _FakeRequest()))
+
+    full = "".join(
+        json.loads(c[len("data: ") :].strip())["choices"][0]["delta"].get("content") or ""
+        for c in chunks
+        if c.startswith("data: ") and not c.startswith("data: [DONE]")
+    )
+    # Wording sans parens, friendly TTS.
+    assert "(" not in full and ")" not in full
+    assert "Petite pause" in full or "point" in full
+
+
+def test_stream_pass2_cancellation_increments_cancelled_total() -> None:
+    """T1 — un ``CancelledError`` levé pendant la consommation du
+    reformulator (Pass 2) doit incrémenter ``voice_cancelled_total``.
+    Avant le fix B2, l'exception bypassait le compteur (CancelledError
+    ne dérive pas d'Exception en Python 3.8+)."""
+    body = {"messages": [{"role": "user", "content": "Q"}], "stream": True}
+    fake_events = _events(
+        {"type": "text", "content": "**Markdown** force le reformulateur."},
+    )
+
+    def _cancelling_reformulator(*_a: Any, **_kw: Any) -> AsyncIterator[str]:
+        async def _gen() -> AsyncIterator[str]:
+            yield "premier delta. "
+            raise asyncio.CancelledError()
+
+        return _gen()
+
+    with (
+        patch.object(openai_adapter, "run_guarded_turn", return_value=fake_events),
+        patch.object(
+            openai_adapter,
+            "reformulate_for_voice_stream",
+            side_effect=_cancelling_reformulator,
+        ),
+        # Le CancelledError remonte du finally — on l'attrape pour ne
+        # pas casser pytest. Ce qui compte : ``voice_cancelled_total``.
+        contextlib.suppress(asyncio.CancelledError),
+    ):
+        _drain_chunks(_stream_chat_completion(body, _FakeRequest()))
+
+    snap = stats_module.snapshot()
+    assert snap["voice_cancelled_total"] == 1, (
+        f"voice_cancelled_total should be 1 after Pass 2 CancelledError, got {snap}"
+    )
+
+
+def test_stream_pass2_failure_increments_reformulator_failed() -> None:
+    """O1 — un fallback Pass 2 (Anthropic 429/503) doit incrémenter
+    ``voice_reformulator_failed`` pour visibilité ``/stats``."""
+    body = {"messages": [{"role": "user", "content": "Q"}], "stream": True}
+    fake_events = _events(
+        {"type": "text", "content": "Main response **avec markdown**."},
+    )
+
+    def _failing_reformulator(*_a: Any, **_kw: Any):
+        async def _gen() -> AsyncIterator[str]:
+            raise RuntimeError("anthropic 503")
+            yield  # unreachable
+
+        return _gen()
+
+    with (
+        patch.object(openai_adapter, "run_guarded_turn", return_value=fake_events),
+        patch.object(
+            openai_adapter,
+            "reformulate_for_voice_stream",
+            side_effect=_failing_reformulator,
+        ),
+    ):
+        _drain_chunks(_stream_chat_completion(body, _FakeRequest()))
+
+    snap = stats_module.snapshot()
+    assert snap["voice_reformulator_failed"] == 1
+
+
+def test_chat_completions_rejects_oversized_messages_array() -> None:
+    """B3 — un body avec > 50 messages doit renvoyer 400 sans entrer
+    dans le pipeline (DoS LLM tokens prevented)."""
+    from genial_agent.voice.openai_adapter import _MAX_MESSAGES_PER_REQUEST, chat_completions
+
+    overflow = [{"role": "user", "content": f"q{i}"} for i in range(_MAX_MESSAGES_PER_REQUEST + 1)]
+    body = {"messages": overflow, "stream": True}
+
+    # Stub la verif Bearer (test isolé du middleware).
+    with (
+        patch.object(openai_adapter, "verify_eleven_request", return_value=None),
+        patch.object(openai_adapter, "run_guarded_turn") as mock_run,
+    ):
+        # Synthétise une Request HTTP avec body JSON.
+        from starlette.requests import Request
+
+        body_bytes = json.dumps(body).encode("utf-8")
+
+        async def _receive() -> dict[str, Any]:
+            return {"type": "http.request", "body": body_bytes, "more_body": False}
+
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/chat/completions",
+            "headers": [(b"content-type", b"application/json")],
+            "query_string": b"",
+        }
+        req = Request(scope, _receive)
+        resp = asyncio.run(chat_completions(req))
+
+        assert resp.status_code == 400
+        # Pipeline jamais invoqué.
+        mock_run.assert_not_called()
+
+
+def test_chat_completions_rejects_oversized_body_via_content_length() -> None:
+    """B4 — content-length > _MAX_BODY_BYTES → 413 sans parser le body."""
+    from genial_agent.voice.openai_adapter import _MAX_BODY_BYTES, chat_completions
+
+    with (
+        patch.object(openai_adapter, "verify_eleven_request", return_value=None),
+        patch.object(openai_adapter, "run_guarded_turn") as mock_run,
+    ):
+        from starlette.requests import Request
+
+        async def _receive() -> dict[str, Any]:
+            # Ne devrait jamais être appelé : on rejette avant le parse.
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/chat/completions",
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(_MAX_BODY_BYTES + 1).encode("ascii")),
+            ],
+            "query_string": b"",
+        }
+        req = Request(scope, _receive)
+        resp = asyncio.run(chat_completions(req))
+
+        assert resp.status_code == 413
+        mock_run.assert_not_called()

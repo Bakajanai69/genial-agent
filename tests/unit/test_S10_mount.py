@@ -136,6 +136,76 @@ def test_voice_meta_escapes_html_special_chars(monkeypatch: pytest.MonkeyPatch) 
     assert "&quot;" in body or "&lt;" in body
 
 
+def test_warns_when_voice_mode_enabled_but_agent_id_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """B7 — voice mode ON sans ``ELEVEN_AGENT_ID`` → log structuré
+    ``voice_mode_enabled_but_agent_id_missing`` au boot. Sans ce signal,
+    le bootstrap JS skip silencieusement et l'admin pense que le widget
+    est cassé.
+
+    On capture via stdout (structlog par défaut écrit en stdout, ne
+    transite pas systématiquement par caplog stdlib selon la config
+    ``observability.logging``).
+    """
+    _set_settings(monkeypatch, ENABLE_VOICE_MODE=True, ELEVEN_AGENT_ID="")
+    mount_module.mount_voice_routes()
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    assert "voice_mode_enabled_but_agent_id_missing" in combined, (
+        f"warning missing in captured output:\n{combined!r}"
+    )
+
+
+def test_no_warning_when_voice_mode_enabled_with_agent_id(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Sanity : le warning doit être silencieux quand l'admin a fourni l'ID."""
+    _set_settings(monkeypatch, ENABLE_VOICE_MODE=True, ELEVEN_AGENT_ID="agent_abc")
+    mount_module.mount_voice_routes()
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    assert "voice_mode_enabled_but_agent_id_missing" not in combined
+
+
+def test_voice_meta_no_store_cache_header(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Q3 — le meta endpoint pose ``Cache-Control: no-store`` pour
+    empêcher un proxy CDN d'absorber un toggle voice à chaud."""
+    _set_settings(monkeypatch, ENABLE_VOICE_MODE=True, ELEVEN_AGENT_ID="agent_xyz")
+    mount_module.mount_voice_routes()
+
+    from chainlit.server import app as cl_app
+    from starlette.testclient import TestClient
+
+    client = TestClient(cl_app)
+    resp = client.get("/voice-meta.html")
+    cache = resp.headers.get("cache-control", "")
+    assert "no-store" in cache.lower()
+
+
+def test_voice_meta_escapes_gt_via_html_escape(monkeypatch: pytest.MonkeyPatch) -> None:
+    """B6 — l'ancien escape manuel oubliait ``>``. ``html.escape(quote=True)``
+    couvre maintenant tous les chars dangereux."""
+    _set_settings(
+        monkeypatch,
+        ENABLE_VOICE_MODE=True,
+        ELEVEN_AGENT_ID="x>injected",
+    )
+    mount_module.mount_voice_routes()
+
+    from chainlit.server import app as cl_app
+    from starlette.testclient import TestClient
+
+    client = TestClient(cl_app)
+    resp = client.get("/voice-meta.html")
+    body = resp.text
+    # Le ``>`` brut ne doit pas apparaître dans l'attribut.
+    assert "x>injected" not in body
+    assert "&gt;" in body
+
+
 def test_chat_completions_endpoint_404_when_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
