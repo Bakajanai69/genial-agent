@@ -79,7 +79,7 @@ Microsoft Foundry EU) dans
 Si tu lis ce repo en mode CTO et tu as 5 min, ouvre dans cet ordre :
 
 1. **[`docs/architecture-decisions.md`](docs/architecture-decisions.md)**
-   — 12 ADR condensés à la 1ère personne : ce que j'ai choisi, ce que
+   — 12 ADR condensés  : ce que j'ai choisi, ce que
    j'ai écarté, et pourquoi. Inclut l'architecture cible AWS si on
    productionnise.
 2. **[`docs/workflow-claude-code.md`](docs/workflow-claude-code.md)**
