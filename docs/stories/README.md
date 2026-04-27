@@ -190,10 +190,26 @@ opérationnelles.
 
 - [ ] MVP vert samedi soir (gating §19.1 du cahier des charges respecté).
 - [x] `ELEVENLABS_API_KEY` fournie dans `.env` (cf. plus haut).
-- [x] Solde crédits ElevenLabs vérifié (tier `growing_business`, quota
-      mensuel 5.9 M chars).
-- [ ] Passer `ENABLE_VOICE_BRIEF=true` dans `.env` local + Railway après
-      merge S10 + gating vert.
+- [x] Solde crédits ElevenLabs TTS vérifié (tier `growing_business`,
+      quota mensuel 5.9 M chars). **Note S10 phase 1** : les minutes
+      Eleven Agents (Conversational AI) sont facturées séparément à
+      10 ¢/min Pro / 8 ¢/min Business annuel — à vérifier dans le
+      dashboard `Usage` quel est l'inclus pour `growing_business`.
+- [ ] **Création Eleven Agent dans le dashboard ElevenLabs** : voix
+      Gaëlle, langue FR, custom LLM URL Railway, soft timeout 3 s,
+      turn eagerness Patient, domain allowlist (Railway + localhost).
+      Détails : `docs/stories/S10-voice-brief.md` §"Étape 0".
+- [ ] **Récupérer `ELEVEN_AGENT_ID`** (depuis l'URL du dashboard) +
+      l'ajouter en Railway env + `.env` local.
+- [ ] **Générer `ELEVEN_AGENT_SHARED_TOKEN`** (32+ chars random,
+      `python -c "import secrets; print(secrets.token_urlsafe(32))"`)
+      + l'enregistrer simultanément dans (a) Workspace Secret
+      ElevenLabs, (b) Railway Project Variables, (c) `.env` local.
+- [ ] Renommer `ENABLE_VOICE_BRIEF` → `ENABLE_VOICE_MODE` dans tous
+      les fichiers concernés (cf. liste S10-voice-brief.md
+      §"Inputs utilisateur").
+- [ ] Passer `ENABLE_VOICE_MODE=true` dans `.env` local + Railway
+      après merge S10 + gating vert.
 
 ### Optionnel
 
