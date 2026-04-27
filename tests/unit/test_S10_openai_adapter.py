@@ -170,13 +170,16 @@ def _mock_reformulator(request: pytest.FixtureRequest):
 
 def test_stream_emits_role_first_then_reformulated_then_done() -> None:
     """Pipeline 2-passes : main LLM bufferé, reformulator yield SSE,
-    [DONE] en fin. Le main text seul n'est PAS yieldé direct."""
+    [DONE] en fin. Le main text seul n'est PAS yieldé direct.
+
+    Utilise du Markdown pour bypass le skip B2 et forcer le reformulator.
+    """
     body = {"messages": [{"role": "user", "content": "Donne-moi LVMH"}], "stream": True}
     fake_req = _FakeRequest()
 
     fake_events = _events(
-        {"type": "text", "content": "Bonjour, "},
-        {"type": "text", "content": "voici la réponse Markdown."},
+        {"type": "text", "content": "**Bonjour**, "},  # Markdown bold = no-skip
+        {"type": "text", "content": "voici la réponse."},
         {"type": "end", "reason": "end_turn"},
     )
 
@@ -190,7 +193,6 @@ def test_stream_emits_role_first_then_reformulated_then_done() -> None:
     body_chunks = [json.loads(c[len("data: ") :].strip()) for c in chunks[1:-2]]
     contents = "".join(c["choices"][0]["delta"].get("content") or "" for c in body_chunks)
     assert "[REFORMULATED]" in contents
-    assert "Bonjour, voici la réponse Markdown." in contents
     # Avant-dernier : finish_reason=stop. Dernier : [DONE].
     finish = json.loads(chunks[-2][len("data: ") :].strip())
     assert finish["choices"][0]["finish_reason"] == "stop"
@@ -199,11 +201,14 @@ def test_stream_emits_role_first_then_reformulated_then_done() -> None:
 
 def test_stream_emits_narration_live_during_tool_use() -> None:
     """La narration tool_use doit sortir AVANT la reformulation (live
-    pendant Pass 1) — pas bufferée."""
+    pendant Pass 1) — pas bufferée.
+
+    Utilise du Markdown pour bypass le skip B2.
+    """
     body = {"messages": [{"role": "user", "content": "Q"}], "stream": True}
     fake_events = _events(
         {"type": "tool_use", "name": "sirenisateur", "id": "t1", "input": {}},
-        {"type": "text", "content": "Réponse main."},
+        {"type": "text", "content": "**Réponse main** avec markdown."},
     )
     with patch.object(openai_adapter, "run_guarded_turn", return_value=fake_events):
         chunks = _drain_chunks(_stream_chat_completion(body, _FakeRequest()))
@@ -221,11 +226,40 @@ def test_stream_emits_narration_live_during_tool_use() -> None:
     # La narration arrive live (pendant Pass 1)
     assert "Je cherche le SIREN" in full
     # La réponse main est passée via le reformulateur (mocké)
-    assert "[REFORMULATED] Réponse main." in full
+    assert "[REFORMULATED]" in full
     # Ordre : narration AVANT reformulé
     narration_idx = full.find("Je cherche le SIREN")
     reformul_idx = full.find("[REFORMULATED]")
     assert narration_idx < reformul_idx
+
+
+def test_stream_skips_reformulator_on_short_voice_friendly_text() -> None:
+    """B2 : si la réponse main est courte + sans Markdown, on skip
+    le reformulateur (économie 1.5-2s latence)."""
+    body = {"messages": [{"role": "user", "content": "Salut"}], "stream": True}
+    fake_events = _events(
+        {"type": "text", "content": "Salut, ça va bien merci."},  # court + clean
+    )
+    refmt_called = []
+
+    def _track(*a: Any, **kw: Any) -> AsyncIterator[str]:
+        refmt_called.append(True)
+        return _strs("never")
+
+    with (
+        patch.object(openai_adapter, "run_guarded_turn", return_value=fake_events),
+        patch.object(openai_adapter, "reformulate_for_voice_stream", side_effect=_track),
+    ):
+        chunks = _drain_chunks(_stream_chat_completion(body, _FakeRequest()))
+
+    assert refmt_called == [], "skip B2 attendu sur conversationnel court"
+    full = "".join(
+        json.loads(c[len("data: ") :].strip())["choices"][0]["delta"].get("content") or ""
+        for c in chunks
+        if c.startswith("data: ") and not c.startswith("data: [DONE]")
+    )
+    # On a quand même le main text yieldé (skip ne yield rien)
+    assert "Salut, ça va bien merci." in full
 
 
 def test_stream_unknown_tool_uses_default_narration() -> None:
@@ -248,15 +282,16 @@ def test_stream_unknown_tool_uses_default_narration() -> None:
 def test_stream_strips_markdown_safety_net() -> None:
     """D : le strip Markdown doit nettoyer ** ## - * du reformulateur."""
     body = {"messages": [{"role": "user", "content": "Q"}], "stream": True}
-    fake_events = _events({"type": "text", "content": "Main response."})
+    # Main contient du Markdown pour bypass le skip B2 (force reformulator).
+    fake_events = _events({"type": "text", "content": "Main response **with markdown**."})
 
     # Mock reformulateur qui yield du Markdown impur (cas où Haiku
     # laisse passer malgré la consigne).
     def _polluted_reformulator(*_a: Any, **_kw: Any) -> AsyncIterator[str]:
         return _strs(
             "## Titre\n",
-            "Voici **du gras** et _italique_ avec ⚠️ emoji.\n",
-            "- bullet 1\n- bullet 2",
+            "Voici **du gras** et _italique_ avec ⚠️ emoji. ",
+            "- bullet 1\n- bullet 2.",
         )
 
     with (

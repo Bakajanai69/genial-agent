@@ -47,6 +47,12 @@ from starlette.responses import JSONResponse, StreamingResponse
 from genial_agent.agent import ConversationState
 from genial_agent.guardrails import run_guarded_turn
 from genial_agent.observability.stats import incr as stats_incr
+from genial_agent.voice.flow import (
+    FILLER_INTERVAL_S,
+    next_filler,
+    sentence_buffer,
+    should_skip_reformulator,
+)
 from genial_agent.voice.narrate import narrate
 from genial_agent.voice.reformulator import (
     reformulate_for_voice_stream,
@@ -261,20 +267,55 @@ async def _stream_chat_completion(
     main_text_buffer: list[str] = []
     narration_chars = 0
     reformulated_chars = 0
+    filler_chars = 0
+    skipped_reformulator = False
     done_yielded = False
+
+    # B1 — voix de meubles : index rotatif + horloge dernier event
+    # voice-friendly (filler ou narration ou text). Émet une voix de
+    # meuble si > ``FILLER_INTERVAL_S`` sans signal côté Pass 1.
+    last_event_t = time.monotonic()
+    filler_idx = 0
+
+    def _need_filler() -> bool:
+        return time.monotonic() - last_event_t >= FILLER_INTERVAL_S
 
     try:
         # ---------------------------------------------------------- #
-        # Pass 1 : main LLM + narration tool steps LIVE
+        # Pass 1 : main LLM + narration tool steps LIVE + voix meubles
         # ---------------------------------------------------------- #
         try:
-            async for event in turn_gen:
-                # Surveille l'état du client : si Eleven a fermé la
-                # connexion (interruption user, fin de session vocale,
-                # navigateur fermé), on stoppe proprement.
+            # Wrap turn_gen pour pouvoir intercepter les longs silences
+            # via wait_for. Si > FILLER_INTERVAL_S sans event, on émet
+            # une voix de meuble et on continue d'attendre.
+            aiter = turn_gen.__aiter__()
+            while True:
+                # Surveille l'état du client.
                 if await request.is_disconnected():
                     cancelled = True
-                    logger.info("voice_chat_completion_client_disconnected", session_id=session_id)
+                    logger.info(
+                        "voice_chat_completion_client_disconnected",
+                        session_id=session_id,
+                    )
+                    break
+
+                # Attend le prochain event AVEC timeout = filler interval.
+                # Si timeout → on émet une voix de meuble et on re-attend.
+                try:
+                    event = await asyncio.wait_for(aiter.__anext__(), timeout=FILLER_INTERVAL_S)
+                except TimeoutError:
+                    if _need_filler():
+                        phrase = next_filler(filler_idx)
+                        filler_idx += 1
+                        filler_chars += len(phrase)
+                        yield _sse_chunk(
+                            phrase,
+                            chunk_id=chunk_id,
+                            model_label=model_label,
+                        )
+                        last_event_t = time.monotonic()
+                    continue
+                except StopAsyncIteration:
                     break
 
                 etype = event.get("type")
@@ -284,12 +325,10 @@ async def _stream_chat_completion(
                     if content:
                         # Buffer pour Pass 2, ne yield PAS direct.
                         main_text_buffer.append(content)
+                        last_event_t = time.monotonic()
 
                 elif etype == "tool_use":
-                    # Narration LIVE (mitigation latence U3) — émise
-                    # dans le SSE pendant que Pappers répond, donne du
-                    # texte à TTS-er au widget pour ne pas avoir de
-                    # silence. Phrase neutre, pas de hardcode entité.
+                    # Narration LIVE (mitigation latence U3).
                     tool_name = event.get("name") or ""
                     phrase = narrate(tool_name) + " "
                     narration_chars += len(phrase)
@@ -299,11 +338,10 @@ async def _stream_chat_completion(
                         chunk_id=chunk_id,
                         model_label=model_label,
                     )
+                    last_event_t = time.monotonic()
 
                 elif etype == "input_rejected":
-                    # Input refusé par C1 input gate. Court-circuit :
-                    # pas de reformulateur (rien à reformuler), on
-                    # yield direct un message court.
+                    # Input refusé par C1 input gate. Court-circuit.
                     phrase = "Je ne peux pas traiter cette demande. Reformule s'il te plaît."
                     narration_chars += len(phrase)
                     rejected = True
@@ -315,8 +353,7 @@ async def _stream_chat_completion(
                     break
 
                 elif etype == "capped":
-                    # Cap atteint en cours de turn. Annonce brève à
-                    # l'oral (le user pourra dire "continue").
+                    # Cap atteint en cours de turn.
                     phrase = " (Pause sur le cap.) "
                     narration_chars += len(phrase)
                     yield _sse_chunk(
@@ -324,10 +361,10 @@ async def _stream_chat_completion(
                         chunk_id=chunk_id,
                         model_label=model_label,
                     )
+                    last_event_t = time.monotonic()
 
-                # Les autres events (llm_meta, tool_result, routing_*,
-                # critic_*, validator_degraded, payload_*) sont ignorés
-                # côté SSE — ils sont visibles via les compteurs /stats.
+                # Autres events (llm_meta, tool_result, routing_*,
+                # critic_*, validator_degraded, payload_*) ignorés.
 
         except asyncio.CancelledError:
             cancelled = True
@@ -336,50 +373,73 @@ async def _stream_chat_completion(
             logger.exception("voice_chat_completion_main_error", session_id=session_id)
 
         # ---------------------------------------------------------- #
-        # Pass 2 : reformulateur Haiku → SSE chunks voice-friendly
+        # Pass 2 : reformulateur Haiku (avec skip B2 si conversationnel
+        # + sentence buffer A4 sur les chunks SSE)
         # ---------------------------------------------------------- #
         if not cancelled and not rejected and main_text_buffer:
             full_main_text = "".join(main_text_buffer)
-            logger.info(
-                "voice_reformulator_start",
-                session_id=session_id,
-                main_chars=len(full_main_text),
-            )
-            try:
-                async for delta in reformulate_for_voice_stream(last_user_text, full_main_text):
-                    # Vérifie disconnect aussi pendant la reformulation
-                    # (l'utilisateur peut interrompre pendant la voix).
-                    if await request.is_disconnected():
-                        cancelled = True
-                        logger.info(
-                            "voice_reformulator_client_disconnected",
-                            session_id=session_id,
-                        )
-                        break
-                    clean = strip_markdown_for_tts(delta)
-                    if clean:
-                        reformulated_chars += len(clean)
-                        yield _sse_chunk(
-                            clean,
-                            chunk_id=chunk_id,
-                            model_label=model_label,
-                        )
-            except Exception:  # noqa: BLE001 — fallback sur main text strippé
-                logger.exception(
-                    "voice_reformulator_failed_fallback_to_main",
+
+            # B2 — skip reformulateur si réponse déjà voice-friendly
+            # (court + pas de Markdown). Économise ~1.5-2s sur les
+            # questions conversationnelles ("salut", "merci", etc.).
+            if should_skip_reformulator(full_main_text):
+                skipped_reformulator = True
+                logger.info(
+                    "voice_reformulator_skipped",
                     session_id=session_id,
+                    main_chars=len(full_main_text),
+                    reason="already_voice_friendly",
                 )
-                # Fallback : yield le main text strippé Markdown (mieux
-                # que rien). L'utilisateur entendra une version moins
-                # voice-friendly, mais aura quand même du contenu.
-                fallback = strip_markdown_for_tts(full_main_text)
-                if fallback:
-                    reformulated_chars += len(fallback)
+                clean = strip_markdown_for_tts(full_main_text)
+                if clean:
+                    reformulated_chars += len(clean)
                     yield _sse_chunk(
-                        fallback,
+                        clean,
                         chunk_id=chunk_id,
                         model_label=model_label,
                     )
+            else:
+                logger.info(
+                    "voice_reformulator_start",
+                    session_id=session_id,
+                    main_chars=len(full_main_text),
+                )
+                try:
+                    # A4 — sentence_buffer accumule les deltas reformulateur
+                    # jusqu'à un boundary voice-friendly (`. ! ?`) avant
+                    # flush. ElevenLabs reçoit des phrases complètes plutôt
+                    # que des chunks fragmentés.
+                    raw_stream = reformulate_for_voice_stream(last_user_text, full_main_text)
+                    async for chunk in sentence_buffer(raw_stream):
+                        # Vérifie disconnect.
+                        if await request.is_disconnected():
+                            cancelled = True
+                            logger.info(
+                                "voice_reformulator_client_disconnected",
+                                session_id=session_id,
+                            )
+                            break
+                        clean = strip_markdown_for_tts(chunk)
+                        if clean:
+                            reformulated_chars += len(clean)
+                            yield _sse_chunk(
+                                clean,
+                                chunk_id=chunk_id,
+                                model_label=model_label,
+                            )
+                except Exception:  # noqa: BLE001 — fallback sur main strippé
+                    logger.exception(
+                        "voice_reformulator_failed_fallback_to_main",
+                        session_id=session_id,
+                    )
+                    fallback = strip_markdown_for_tts(full_main_text)
+                    if fallback:
+                        reformulated_chars += len(fallback)
+                        yield _sse_chunk(
+                            fallback,
+                            chunk_id=chunk_id,
+                            model_label=model_label,
+                        )
 
         # ---------------------------------------------------------- #
         # Final SSE chunks AVANT aclose() (hotfix C : pause finale 1.2s)
@@ -425,7 +485,7 @@ async def _stream_chat_completion(
 
         if cancelled:
             stats_incr(voice_cancelled_total=1)
-        total_tts_chars = narration_chars + reformulated_chars
+        total_tts_chars = narration_chars + reformulated_chars + filler_chars
         if total_tts_chars > 0:
             stats_incr(voice_chars_tts=total_tts_chars)
 
@@ -434,9 +494,11 @@ async def _stream_chat_completion(
             session_id=session_id,
             cancelled=cancelled,
             rejected=rejected,
+            skipped_reformulator=skipped_reformulator,
             main_text_chars=sum(len(c) for c in main_text_buffer),
             narration_chars=narration_chars,
             reformulated_chars=reformulated_chars,
+            filler_chars=filler_chars,
         )
 
 
