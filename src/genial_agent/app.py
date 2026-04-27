@@ -225,6 +225,23 @@ async def starters() -> list[cl.Starter]:
     return STARTERS
 
 
+def _init_session_defaults() -> None:
+    """Pose les variables de session essentielles que ``on_message``
+    attend (``state``, ``entity_banner_msg``, ``credits_low_banner_shown``,
+    ``SESSION_OWNER_KEY``).
+
+    Factorisé entre ``on_chat_start`` (nouvelle conversation) et
+    ``on_chat_resume`` (reprise depuis la sidebar) : sans ces variables
+    initialisées, Chainlit désactive la chat input — l'utilisateur ne
+    peut plus écrire dans la conversation reprise.
+    """
+    cl.user_session.set("state", ConversationState())
+    cl.user_session.set("entity_banner_msg", None)
+    cl.user_session.set("credits_low_banner_shown", False)
+    if not cl.user_session.get(SESSION_OWNER_KEY):
+        cl.user_session.set(SESSION_OWNER_KEY, uuid.uuid4().hex)
+
+
 @cl.on_chat_start
 async def on_chat_start() -> None:
     """Création du state par session + healthcheck MCP visible.
@@ -234,19 +251,7 @@ async def on_chat_start() -> None:
     active" est initialisée à ``None`` et remplacée à la fin du 1er
     turn qui résout une entité.
     """
-    cl.user_session.set("state", ConversationState())
-    cl.user_session.set("entity_banner_msg", None)
-    # Flag de dédup du bandeau crédits bas (review M2). Reset à chaque
-    # ouverture de chat pour qu'une nouvelle session puisse re-voir
-    # l'avertissement même si l'utilisateur a déjà été notifié dans une
-    # session précédente.
-    cl.user_session.set("credits_low_banner_shown", False)
-    # Review S09.6 P1-3 : owner_id par session pour isoler les threads
-    # de la sidebar Chainlit. Sans cookie persistant, l'UUID change à
-    # chaque rafraîchissement page — la sidebar redevient vide pour ce
-    # visiteur, mais reste invisible aux autres.
-    if not cl.user_session.get(SESSION_OWNER_KEY):
-        cl.user_session.set(SESSION_OWNER_KEY, uuid.uuid4().hex)
+    _init_session_defaults()
 
     # Healthcheck Pappers borné dur (cf. ``_HEALTHCHECK_TIMEOUT_S``).
     # ``mcp_pappers.healthcheck`` retourne déjà ``status="ko"`` sur
@@ -301,6 +306,33 @@ async def on_chat_start() -> None:
                 "ui_prewarm_skip_at_boot",
                 error_type=type(exc).__name__,
             )
+
+
+@cl.on_chat_resume
+async def on_chat_resume(thread: dict) -> None:
+    """Reprise d'une conversation existante depuis la sidebar Chainlit.
+
+    Sans ce hook, Chainlit affiche les messages historiques du thread
+    mais **désactive la chat input** — l'utilisateur ne peut plus
+    écrire de nouveau message dans la conversation reprise.
+
+    On réinitialise les variables de session essentielles
+    (``state``, ``entity_banner_msg``, ``credits_low_banner_shown``,
+    ``SESSION_OWNER_KEY``) pour qu'``on_message`` fonctionne.
+
+    **Limite assumée** : on ne reconstruit pas le ``ConversationState``
+    historique à partir des steps stockés. Conséquence : l'agent
+    reprend "from scratch" sur le prochain message — il ne se souvient
+    pas du contexte des tours précédents (multi-turn cross-session).
+    Acceptable pour le scope démo (la sidebar sert d'historique côté
+    UX, pas de continuité logique côté agent). À améliorer si besoin
+    en parsant ``thread["steps"]`` pour reconstruire ``state.messages``.
+    """
+    _init_session_defaults()
+    logger.info(
+        "ui_chat_resumed",
+        thread_id=thread.get("id") if isinstance(thread, dict) else None,
+    )
 
 
 @cl.on_message
