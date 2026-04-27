@@ -163,6 +163,51 @@ def _inject_cookie_into_request_headers(
     return rebuilt
 
 
+def _is_html_pageload(request: Request) -> bool:
+    """Heuristique : vrai si la requête est un pageload HTML
+    (``GET`` + ``Accept: text/html``).
+
+    Pourquoi cette restriction
+    --------------------------
+
+    Au tout 1er pageload (cookie/localStorage absents), le navigateur
+    envoie en parallèle 30-50 requêtes (HTML, CSS, JS, fonts, images,
+    favicon, manifest, etc.). En HTTP/2 multiplex, ces requêtes
+    partent **avant** que la 1re réponse ``Set-Cookie`` n'arrive — le
+    navigateur n'a donc encore aucun cookie à envoyer.
+
+    Si on mint un ``owner_id`` distinct sur **chaque** requête, on
+    pose 50 ``Set-Cookie`` différents. Le navigateur garde "le
+    dernier" reçu, dans un ordre dépendant de la latence — et la
+    WebSocket Chainlit peut s'ouvrir avec un cookie encore différent
+    (= race condition, le bug initial qu'on essayait de fermer).
+
+    En limitant le mint au pageload HTML uniquement, on garantit
+    qu'**un seul** ``Set-Cookie`` est posé par cycle pageload — la
+    valeur stockée par le navigateur est déterministe, et toutes les
+    requêtes suivantes (assets, WebSocket) envoient ce même cookie.
+    """
+    if request.method != "GET":
+        return False
+    accept = request.headers.get("accept", "").lower()
+    return "text/html" in accept
+
+
+def _request_is_secure(request: Request) -> bool:
+    """Détecte HTTPS y compris derrière un proxy TLS (Railway, Heroku,
+    Cloudflare).
+
+    Railway termine TLS à son edge load balancer et passe en HTTP au
+    backend → ``request.url.scheme == "http"`` malgré le HTTPS côté
+    client. On lit donc en priorité ``X-Forwarded-Proto`` que les
+    proxies posent par convention.
+    """
+    forwarded_proto = request.headers.get("x-forwarded-proto", "").lower()
+    if forwarded_proto:
+        return forwarded_proto == "https"
+    return request.url.scheme == "https"
+
+
 async def ensure_owner_cookie_dispatch(
     request: Request,
     call_next: Callable[[Request], Awaitable[Response]],
@@ -172,15 +217,23 @@ async def ensure_owner_cookie_dispatch(
     Compatible avec ``BaseHTTPMiddleware`` (signature
     ``(request, call_next) -> Response``) et avec le decorator
     ``@app.middleware("http")`` qui passe la même signature.
+
+    On ne mint que sur les pageloads HTML (``_is_html_pageload``) pour
+    éviter le multi-mint en cas de pageload parallèle (cf. docstring
+    de ``_is_html_pageload``).
     """
     cookie_header = request.headers.get("cookie", "")
     existing = _extract_existing_owner_id(cookie_header)
 
     minted_id: str | None = None
-    if existing is None:
+    if existing is None and _is_html_pageload(request):
         minted_id = generate_owner_id()
-        # Inject le cookie dans le scope ASGI pour que header_auth_callback
-        # (Chainlit) le voie comme un cookie reçu du client.
+        # Inject le cookie dans le scope ASGI pour que
+        # ``header_auth_callback`` (Chainlit) le voie comme un cookie
+        # reçu du client. Sur un upgrade WebSocket subséquent, le
+        # navigateur enverra le cookie posé en réponse — pas besoin
+        # d'inject côté WS handshake (BaseHTTPMiddleware ne l'attrape
+        # de toute façon pas).
         request.scope["headers"] = _inject_cookie_into_request_headers(
             request.scope.get("headers", []),
             minted_id,
@@ -189,15 +242,13 @@ async def ensure_owner_cookie_dispatch(
             "auth_owner_cookie_minted",
             identifier_prefix=minted_id[:8],
             scheme=request.url.scheme,
+            path=request.url.path,
         )
 
     response = await call_next(request)
 
     if minted_id is not None:
-        # ``Secure`` uniquement en HTTPS — Chrome/Firefox refusent
-        # ``Secure`` sur ``http://localhost`` (cf. comportement
-        # documenté ``public/eleven-widget-bootstrap.js``).
-        is_secure = request.url.scheme == "https"
+        is_secure = _request_is_secure(request)
         response.set_cookie(
             key=OWNER_COOKIE_NAME,
             value=minted_id,

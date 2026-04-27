@@ -169,11 +169,14 @@ def _build_test_app() -> Starlette:
     return app
 
 
-def test_dispatch_no_cookie_mints_and_sets_cookie() -> None:
-    """Pas de cookie côté client → middleware génère + injecte + pose
+_HTML_HEADERS = {"accept": "text/html,application/xhtml+xml,*/*;q=0.8"}
+
+
+def test_dispatch_no_cookie_html_pageload_mints_and_sets_cookie() -> None:
+    """Pageload HTML sans cookie → middleware génère + injecte + pose
     Set-Cookie en réponse."""
     client = TestClient(_build_test_app())
-    response = client.get("/probe")
+    response = client.get("/probe", headers=_HTML_HEADERS)
     assert response.status_code == 200
     # Le handler a vu un cookie injecté.
     cookie_header = response.json()["cookie_header"]
@@ -189,12 +192,53 @@ def test_dispatch_no_cookie_mints_and_sets_cookie() -> None:
     assert minted in response.headers.get("set-cookie", "")
 
 
+def test_dispatch_no_cookie_asset_request_does_NOT_mint() -> None:
+    """Requête asset (CSS/JS/image) sans cookie → middleware **ne mint
+    pas**. Évite le multi-mint sur les pageloads parallèles HTTP/2."""
+    client = TestClient(_build_test_app())
+    # Accept image/png comme un browser le fait pour les images.
+    response = client.get("/probe", headers={"accept": "image/png,image/*"})
+    assert response.status_code == 200
+    # Pas de Set-Cookie posé.
+    assert OWNER_COOKIE_NAME not in response.headers.get("set-cookie", "")
+    # Le handler n'a pas vu de cookie injecté non plus.
+    assert OWNER_COOKIE_NAME not in response.json()["cookie_header"]
+
+
+def test_dispatch_no_cookie_api_json_does_NOT_mint() -> None:
+    """Requête API JSON (SDK / fetch) sans cookie → middleware **ne mint
+    pas** non plus."""
+    client = TestClient(_build_test_app())
+    response = client.get("/probe", headers={"accept": "application/json"})
+    assert response.status_code == 200
+    assert OWNER_COOKIE_NAME not in response.headers.get("set-cookie", "")
+
+
+def test_dispatch_no_cookie_post_request_does_NOT_mint() -> None:
+    """Méthode non-GET (POST/PUT/DELETE) → pas de mint, c'est un appel
+    API pas un pageload."""
+
+    async def probe_post(request: Request) -> JSONResponse:
+        return JSONResponse({"cookie_header": request.headers.get("cookie", "")})
+
+    app = Starlette(routes=[Route("/probe", probe_post, methods=["POST"])])
+    app.add_middleware(BaseHTTPMiddleware, dispatch=ensure_owner_cookie_dispatch)
+    client = TestClient(app)
+    response = client.post("/probe", headers=_HTML_HEADERS)
+    assert response.status_code == 200
+    assert OWNER_COOKIE_NAME not in response.headers.get("set-cookie", "")
+
+
 def test_dispatch_cookie_present_passes_through() -> None:
     """Cookie déjà présent → middleware n'intervient pas, pas de
-    Set-Cookie superflu."""
+    Set-Cookie superflu, même sur un pageload HTML."""
     client = TestClient(_build_test_app())
     existing = "f" * 32
-    response = client.get("/probe", cookies={OWNER_COOKIE_NAME: existing})
+    response = client.get(
+        "/probe",
+        cookies={OWNER_COOKIE_NAME: existing},
+        headers=_HTML_HEADERS,
+    )
     assert response.status_code == 200
     # Le handler voit bien le cookie original.
     assert existing in response.json()["cookie_header"]
@@ -203,11 +247,15 @@ def test_dispatch_cookie_present_passes_through() -> None:
     assert OWNER_COOKIE_NAME not in set_cookie
 
 
-def test_dispatch_malformed_cookie_is_replaced() -> None:
-    """Cookie présent mais malformé → traité comme absent : un nouveau
-    est minté et posé en réponse."""
+def test_dispatch_malformed_cookie_is_replaced_on_html_pageload() -> None:
+    """Cookie présent mais malformé sur un pageload HTML → traité comme
+    absent : un nouveau est minté et posé en réponse."""
     client = TestClient(_build_test_app())
-    response = client.get("/probe", cookies={OWNER_COOKIE_NAME: "BAD"})
+    response = client.get(
+        "/probe",
+        cookies={OWNER_COOKIE_NAME: "BAD"},
+        headers=_HTML_HEADERS,
+    )
     assert response.status_code == 200
     # Le handler voit un nouveau cookie valide (32 hex), pas ``BAD``.
     cookie_header = response.json()["cookie_header"]
@@ -225,9 +273,22 @@ def test_dispatch_secure_flag_only_on_https(scheme: str) -> None:
     """Le ``Secure`` flag est posé uniquement en HTTPS — sinon Chrome
     refuserait le cookie en dev local."""
     client = TestClient(_build_test_app(), base_url=f"{scheme}://testserver")
-    response = client.get("/probe")
+    response = client.get("/probe", headers=_HTML_HEADERS)
     set_cookie = response.headers.get("set-cookie", "")
     if scheme == "https":
         assert "Secure" in set_cookie or "secure" in set_cookie
     else:
         assert "Secure" not in set_cookie and "secure" not in set_cookie
+
+
+def test_dispatch_secure_flag_via_x_forwarded_proto() -> None:
+    """Derrière un proxy TLS (Railway, Cloudflare), ``request.url.scheme``
+    vaut ``"http"`` mais le client est bien en HTTPS — détection via
+    le header ``X-Forwarded-Proto: https``."""
+    client = TestClient(_build_test_app(), base_url="http://testserver")
+    response = client.get(
+        "/probe",
+        headers={**_HTML_HEADERS, "x-forwarded-proto": "https"},
+    )
+    set_cookie = response.headers.get("set-cookie", "")
+    assert "Secure" in set_cookie or "secure" in set_cookie
