@@ -48,6 +48,10 @@ from genial_agent.agent import ConversationState
 from genial_agent.guardrails import run_guarded_turn
 from genial_agent.observability.stats import incr as stats_incr
 from genial_agent.voice.narrate import narrate
+from genial_agent.voice.reformulator import (
+    reformulate_for_voice_stream,
+    strip_markdown_for_tts,
+)
 from genial_agent.voice.security import verify_eleven_request
 from genial_agent.voice.voice_prompt import compose_voice_system_prompt
 
@@ -171,8 +175,37 @@ async def _stream_chat_completion(
     body: dict[str, Any],
     request: Request,
 ) -> AsyncIterator[str]:
-    """Coroutine génératrice qui pilote ``run_guarded_turn`` et yield
-    des chunks SSE OpenAI.
+    """Pipeline voice mode 2-passes vers ElevenLabs (custom LLM SSE).
+
+    **Pass 1 (main LLM)** : ``run_guarded_turn`` est exécuté avec le
+    voice system prompt comme override. On **buffer** les events
+    ``text`` au lieu de les yielder en SSE direct. La narration tool
+    steps (``Je consulte les comptes…``) est en revanche émise LIVE
+    pendant les ``tool_use`` events pour ne pas avoir de silence
+    pendant les appels Pappers.
+
+    **Pass 2 (reformulateur Haiku)** : à la fin du main turn (event
+    ``routing_done``), on prend le buffer et on le donne à
+    ``reformulate_for_voice_stream`` (Haiku) qui génère une version
+    voice-friendly (no Markdown, no SIREN, chiffres arrondis, narratif
+    fluide ~80-100 mots). On stream les chunks reformulés en SSE.
+
+    En sortie : narration LIVE (pendant Pass 1) + texte reformulé
+    (Pass 2). Le main LLM peut produire du texte structuré (Markdown,
+    SIREN) sans casser l'expérience vocale — le reformulateur le
+    nettoie systématiquement avant TTS.
+
+    **Order [DONE] avant aclose()** (S10 hotfix C) : on yield le chunk
+    final + ``[DONE]`` AVANT le cleanup ``turn_gen.aclose()``. Le
+    cleanup attend le critic_async (10 s timeout), ce qui ajoutait
+    ~1 s de silence avant que le widget Eleven libère le TTS. Avec
+    cette inversion, ``[DONE]`` arrive immédiatement après le dernier
+    chunk reformulateur.
+
+    **Strip Markdown safety net** (D) : chaque chunk reformulateur
+    passe par ``strip_markdown_for_tts`` avant d'être envoyé en SSE,
+    pour éliminer un éventuel ``**``, ``##`` ou emoji que le
+    reformulateur aurait laissé passer malgré la consigne.
 
     Capture ``asyncio.CancelledError`` (déconnexion client / interruption
     user côté ElevenLabs) → libère le generator ``run_guarded_turn``
@@ -224,117 +257,186 @@ async def _stream_chat_completion(
         system_prompt_override=voice_system_prompt,
     )
     cancelled = False
-    total_chars = 0
+    rejected = False
+    main_text_buffer: list[str] = []
+    narration_chars = 0
+    reformulated_chars = 0
+    done_yielded = False
 
     try:
-        async for event in turn_gen:
-            # Surveille l'état du client : si Eleven a fermé la
-            # connexion (interruption user, fin de session vocale,
-            # navigateur fermé), on stoppe proprement.
-            if await request.is_disconnected():
-                cancelled = True
-                logger.info("voice_chat_completion_client_disconnected", session_id=session_id)
-                break
+        # ---------------------------------------------------------- #
+        # Pass 1 : main LLM + narration tool steps LIVE
+        # ---------------------------------------------------------- #
+        try:
+            async for event in turn_gen:
+                # Surveille l'état du client : si Eleven a fermé la
+                # connexion (interruption user, fin de session vocale,
+                # navigateur fermé), on stoppe proprement.
+                if await request.is_disconnected():
+                    cancelled = True
+                    logger.info("voice_chat_completion_client_disconnected", session_id=session_id)
+                    break
 
-            etype = event.get("type")
+                etype = event.get("type")
 
-            if etype == "text":
-                content = event.get("content") or ""
-                if not content:
-                    continue
-                total_chars += len(content)
-                yield _sse_chunk(
-                    content,
-                    chunk_id=chunk_id,
-                    model_label=model_label,
+                if etype == "text":
+                    content = event.get("content") or ""
+                    if content:
+                        # Buffer pour Pass 2, ne yield PAS direct.
+                        main_text_buffer.append(content)
+
+                elif etype == "tool_use":
+                    # Narration LIVE (mitigation latence U3) — émise
+                    # dans le SSE pendant que Pappers répond, donne du
+                    # texte à TTS-er au widget pour ne pas avoir de
+                    # silence. Phrase neutre, pas de hardcode entité.
+                    tool_name = event.get("name") or ""
+                    phrase = narrate(tool_name) + " "
+                    narration_chars += len(phrase)
+                    stats_incr(voice_narration_chunks_emitted=1)
+                    yield _sse_chunk(
+                        phrase,
+                        chunk_id=chunk_id,
+                        model_label=model_label,
+                    )
+
+                elif etype == "input_rejected":
+                    # Input refusé par C1 input gate. Court-circuit :
+                    # pas de reformulateur (rien à reformuler), on
+                    # yield direct un message court.
+                    phrase = "Je ne peux pas traiter cette demande. Reformule s'il te plaît."
+                    narration_chars += len(phrase)
+                    rejected = True
+                    yield _sse_chunk(
+                        phrase,
+                        chunk_id=chunk_id,
+                        model_label=model_label,
+                    )
+                    break
+
+                elif etype == "capped":
+                    # Cap atteint en cours de turn. Annonce brève à
+                    # l'oral (le user pourra dire "continue").
+                    phrase = " (Pause sur le cap.) "
+                    narration_chars += len(phrase)
+                    yield _sse_chunk(
+                        phrase,
+                        chunk_id=chunk_id,
+                        model_label=model_label,
+                    )
+
+                # Les autres events (llm_meta, tool_result, routing_*,
+                # critic_*, validator_degraded, payload_*) sont ignorés
+                # côté SSE — ils sont visibles via les compteurs /stats.
+
+        except asyncio.CancelledError:
+            cancelled = True
+            logger.info("voice_chat_completion_cancelled", session_id=session_id)
+        except Exception:  # noqa: BLE001 — on logue + clôture propre
+            logger.exception("voice_chat_completion_main_error", session_id=session_id)
+
+        # ---------------------------------------------------------- #
+        # Pass 2 : reformulateur Haiku → SSE chunks voice-friendly
+        # ---------------------------------------------------------- #
+        if not cancelled and not rejected and main_text_buffer:
+            full_main_text = "".join(main_text_buffer)
+            logger.info(
+                "voice_reformulator_start",
+                session_id=session_id,
+                main_chars=len(full_main_text),
+            )
+            try:
+                async for delta in reformulate_for_voice_stream(last_user_text, full_main_text):
+                    # Vérifie disconnect aussi pendant la reformulation
+                    # (l'utilisateur peut interrompre pendant la voix).
+                    if await request.is_disconnected():
+                        cancelled = True
+                        logger.info(
+                            "voice_reformulator_client_disconnected",
+                            session_id=session_id,
+                        )
+                        break
+                    clean = strip_markdown_for_tts(delta)
+                    if clean:
+                        reformulated_chars += len(clean)
+                        yield _sse_chunk(
+                            clean,
+                            chunk_id=chunk_id,
+                            model_label=model_label,
+                        )
+            except Exception:  # noqa: BLE001 — fallback sur main text strippé
+                logger.exception(
+                    "voice_reformulator_failed_fallback_to_main",
+                    session_id=session_id,
                 )
+                # Fallback : yield le main text strippé Markdown (mieux
+                # que rien). L'utilisateur entendra une version moins
+                # voice-friendly, mais aura quand même du contenu.
+                fallback = strip_markdown_for_tts(full_main_text)
+                if fallback:
+                    reformulated_chars += len(fallback)
+                    yield _sse_chunk(
+                        fallback,
+                        chunk_id=chunk_id,
+                        model_label=model_label,
+                    )
 
-            elif etype == "tool_use":
-                # Narration voice-friendly émise dans le même flux que
-                # le texte final → ElevenLabs streame en continu sans
-                # silence pendant le round-trip Pappers.
-                tool_name = event.get("name") or ""
-                phrase = narrate(tool_name) + " "
-                total_chars += len(phrase)
-                stats_incr(voice_narration_chunks_emitted=1)
-                yield _sse_chunk(
-                    phrase,
-                    chunk_id=chunk_id,
-                    model_label=model_label,
-                )
+        # ---------------------------------------------------------- #
+        # Final SSE chunks AVANT aclose() (hotfix C : pause finale 1.2s)
+        # ---------------------------------------------------------- #
+        # Le aclose() qui suit dans le finally peut traîner ~1 s sur le
+        # critic_async du pipeline. En émettant [DONE] AVANT, le widget
+        # Eleven libère le TTS immédiatement après le dernier chunk de
+        # contenu — pas de silence final perceptible.
+        yield _sse_chunk(
+            "",
+            chunk_id=chunk_id,
+            model_label=model_label,
+            finish_reason="stop",
+        )
+        yield _sse_done()
+        done_yielded = True
 
-            elif etype == "input_rejected":
-                # Input refusé par C1 input gate. On émet une explication
-                # courte vocalisable (l'utilisateur entendra une réponse
-                # sans rester muet).
-                phrase = "Je ne peux pas traiter cette demande. Reformule s'il te plaît."
-                total_chars += len(phrase)
-                yield _sse_chunk(
-                    phrase,
-                    chunk_id=chunk_id,
-                    model_label=model_label,
-                )
-
-            elif etype == "capped":
-                # Cap atteint en cours de turn. Le user pourra continuer
-                # via "continue" oralement. On annonce brièvement.
-                phrase = " (Pause sur le cap.) "
-                total_chars += len(phrase)
-                yield _sse_chunk(
-                    phrase,
-                    chunk_id=chunk_id,
-                    model_label=model_label,
-                )
-
-            # Les autres events (llm_meta, tool_result, routing_*,
-            # critic_*, validator_degraded, payload_*) sont ignorés
-            # côté SSE — ils sont visibles via les compteurs /stats.
-
-    except asyncio.CancelledError:
-        cancelled = True
-        logger.info("voice_chat_completion_cancelled", session_id=session_id)
-        # Ne pas re-raise : on veut clôturer le SSE proprement avec
-        # [DONE] côté finally.
-    except Exception:  # noqa: BLE001 — on logue + clôture propre, ne casse pas SSE
-        logger.exception("voice_chat_completion_error", session_id=session_id)
     finally:
+        # Yield [DONE] aussi en finally au cas où une exception nous
+        # aurait empêché de l'émettre dans le bloc try (idempotent côté
+        # client : un 2e [DONE] est ignoré).
+        if not done_yielded:
+            try:
+                yield _sse_done()
+            except Exception as final_exc:  # noqa: BLE001 — client parti, OK
+                logger.debug(
+                    "voice_chat_completion_done_dropped",
+                    session_id=session_id,
+                    error_type=type(final_exc).__name__,
+                )
+
         # PEP 789 + S03 invariant I5 : aclose() force le cleanup du
         # ``async with state.lock`` dans agent.run_turn même si on
-        # break/raise au milieu. Sans ça, l'interruption user laisserait
-        # le lock détenu jusqu'au GC.
+        # break/raise au milieu. Best-effort APRÈS [DONE] (cf. hotfix C).
         try:
             await turn_gen.aclose()
-        except Exception:  # noqa: BLE001 — best-effort cleanup
-            logger.warning("voice_chat_completion_aclose_failed", session_id=session_id)
+        except Exception as exc:  # noqa: BLE001 — best-effort cleanup
+            logger.warning(
+                "voice_chat_completion_aclose_failed",
+                session_id=session_id,
+                error_type=type(exc).__name__,
+            )
 
         if cancelled:
             stats_incr(voice_cancelled_total=1)
-        # Compteur cumulé de chars TTS (texte envoyé au TTS Eleven).
-        if total_chars > 0:
-            stats_incr(voice_chars_tts=total_chars)
-
-        # Chunk final + [DONE] (idempotent : si le client est parti, le
-        # write n'aboutit pas mais ne bloque pas notre cleanup).
-        try:
-            yield _sse_chunk(
-                "",
-                chunk_id=chunk_id,
-                model_label=model_label,
-                finish_reason="stop",
-            )
-            yield _sse_done()
-        except Exception as final_exc:  # noqa: BLE001 — client parti, OK
-            logger.debug(
-                "voice_chat_completion_final_chunk_dropped",
-                session_id=session_id,
-                error_type=type(final_exc).__name__,
-            )
+        total_tts_chars = narration_chars + reformulated_chars
+        if total_tts_chars > 0:
+            stats_incr(voice_chars_tts=total_tts_chars)
 
         logger.info(
             "voice_chat_completion_done",
             session_id=session_id,
             cancelled=cancelled,
-            total_chars=total_chars,
+            rejected=rejected,
+            main_text_chars=sum(len(c) for c in main_text_buffer),
+            narration_chars=narration_chars,
+            reformulated_chars=reformulated_chars,
         )
 
 

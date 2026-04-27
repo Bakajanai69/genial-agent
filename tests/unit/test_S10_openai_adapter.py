@@ -123,6 +123,16 @@ def _events(*evs: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
     return _gen()
 
 
+def _strs(*deltas: str) -> AsyncIterator[str]:
+    """Stand-in pour le reformulator stream — yield des deltas string."""
+
+    async def _gen() -> AsyncIterator[str]:
+        for d in deltas:
+            yield d
+
+    return _gen()
+
+
 def _drain_chunks(stream: AsyncIterator[str]) -> list[str]:
     """Drain l'async iterator → list[str] (run synchrone via asyncio)."""
     import asyncio
@@ -140,13 +150,33 @@ def _fresh_stats() -> None:
     stats_module.reset_for_tests()
 
 
-def test_stream_emits_role_first_then_text_then_done() -> None:
+@pytest.fixture(autouse=True)
+def _mock_reformulator(request: pytest.FixtureRequest):
+    """Auto-mock le reformulateur Haiku par défaut pour TOUS les tests
+    (évite les vrais appels Anthropic pendant les tests unit). Tests
+    qui veulent un comportement custom peuvent override avec un
+    ``patch.object(openai_adapter, "reformulate_for_voice_stream", ...)``.
+    """
+    if "no_reformulator_mock" in request.keywords:
+        yield
+        return
+    with patch.object(
+        openai_adapter,
+        "reformulate_for_voice_stream",
+        side_effect=lambda question, text, **kw: _strs(f"[REFORMULATED] {text}"),
+    ):
+        yield
+
+
+def test_stream_emits_role_first_then_reformulated_then_done() -> None:
+    """Pipeline 2-passes : main LLM bufferé, reformulator yield SSE,
+    [DONE] en fin. Le main text seul n'est PAS yieldé direct."""
     body = {"messages": [{"role": "user", "content": "Donne-moi LVMH"}], "stream": True}
     fake_req = _FakeRequest()
 
     fake_events = _events(
         {"type": "text", "content": "Bonjour, "},
-        {"type": "text", "content": "voici la réponse."},
+        {"type": "text", "content": "voici la réponse Markdown."},
         {"type": "end", "reason": "end_turn"},
     )
 
@@ -156,25 +186,29 @@ def test_stream_emits_role_first_then_text_then_done() -> None:
     # Premier chunk : delta.role = assistant.
     first = json.loads(chunks[0][len("data: ") :].strip())
     assert first["choices"][0]["delta"] == {"role": "assistant"}
-    # Chunks de texte intermédiaires.
+    # Le reformulateur (mocké) yield un chunk préfixé "[REFORMULATED] ...".
     body_chunks = [json.loads(c[len("data: ") :].strip()) for c in chunks[1:-2]]
-    assert any(c["choices"][0]["delta"].get("content") == "Bonjour, " for c in body_chunks)
-    assert any(c["choices"][0]["delta"].get("content") == "voici la réponse." for c in body_chunks)
+    contents = "".join(c["choices"][0]["delta"].get("content") or "" for c in body_chunks)
+    assert "[REFORMULATED]" in contents
+    assert "Bonjour, voici la réponse Markdown." in contents
     # Avant-dernier : finish_reason=stop. Dernier : [DONE].
     finish = json.loads(chunks[-2][len("data: ") :].strip())
     assert finish["choices"][0]["finish_reason"] == "stop"
     assert chunks[-1] == "data: [DONE]\n\n"
 
 
-def test_stream_emits_narration_on_tool_use() -> None:
+def test_stream_emits_narration_live_during_tool_use() -> None:
+    """La narration tool_use doit sortir AVANT la reformulation (live
+    pendant Pass 1) — pas bufferée."""
     body = {"messages": [{"role": "user", "content": "Q"}], "stream": True}
     fake_events = _events(
         {"type": "tool_use", "name": "sirenisateur", "id": "t1", "input": {}},
-        {"type": "text", "content": "Réponse."},
+        {"type": "text", "content": "Réponse main."},
     )
     with patch.object(openai_adapter, "run_guarded_turn", return_value=fake_events):
         chunks = _drain_chunks(_stream_chat_completion(body, _FakeRequest()))
 
+    # Reconstruire la séquence content order
     contents = []
     for c in chunks:
         if c.startswith("data: ") and not c.startswith("data: [DONE]"):
@@ -184,8 +218,14 @@ def test_stream_emits_narration_on_tool_use() -> None:
                 contents.append(d["content"])
 
     full = "".join(contents)
+    # La narration arrive live (pendant Pass 1)
     assert "Je cherche le SIREN" in full
-    assert "Réponse." in full
+    # La réponse main est passée via le reformulateur (mocké)
+    assert "[REFORMULATED] Réponse main." in full
+    # Ordre : narration AVANT reformulé
+    narration_idx = full.find("Je cherche le SIREN")
+    reformul_idx = full.find("[REFORMULATED]")
+    assert narration_idx < reformul_idx
 
 
 def test_stream_unknown_tool_uses_default_narration() -> None:
@@ -205,6 +245,154 @@ def test_stream_unknown_tool_uses_default_narration() -> None:
     assert "Je consulte Pappers" in full
 
 
+def test_stream_strips_markdown_safety_net() -> None:
+    """D : le strip Markdown doit nettoyer ** ## - * du reformulateur."""
+    body = {"messages": [{"role": "user", "content": "Q"}], "stream": True}
+    fake_events = _events({"type": "text", "content": "Main response."})
+
+    # Mock reformulateur qui yield du Markdown impur (cas où Haiku
+    # laisse passer malgré la consigne).
+    def _polluted_reformulator(*_a: Any, **_kw: Any) -> AsyncIterator[str]:
+        return _strs(
+            "## Titre\n",
+            "Voici **du gras** et _italique_ avec ⚠️ emoji.\n",
+            "- bullet 1\n- bullet 2",
+        )
+
+    with (
+        patch.object(openai_adapter, "run_guarded_turn", return_value=fake_events),
+        patch.object(
+            openai_adapter, "reformulate_for_voice_stream", side_effect=_polluted_reformulator
+        ),
+    ):
+        chunks = _drain_chunks(_stream_chat_completion(body, _FakeRequest()))
+
+    full = "".join(
+        json.loads(c[len("data: ") :].strip())["choices"][0]["delta"].get("content") or ""
+        for c in chunks
+        if c.startswith("data: ") and not c.startswith("data: [DONE]")
+    )
+    # Markdown stripped
+    assert "**" not in full
+    assert "##" not in full
+    assert "⚠️" not in full
+    # Bullet markers stripped
+    assert "- bullet 1" not in full
+    assert "bullet 1" in full
+    # Le contenu textuel reste
+    assert "du gras" in full
+    assert "italique" in full
+
+
+def test_stream_input_rejected_short_circuits_reformulator() -> None:
+    """input_rejected = court-circuit, pas de reformulateur."""
+    body = {"messages": [{"role": "user", "content": "X"}], "stream": True}
+    fake_events = _events(
+        {"type": "input_rejected", "reason_code": "input_injection", "reason": ""},
+    )
+    refmt_called = []
+
+    def _track_reformulator(*a: Any, **kw: Any) -> AsyncIterator[str]:
+        refmt_called.append(True)
+        return _strs("never")
+
+    with (
+        patch.object(openai_adapter, "run_guarded_turn", return_value=fake_events),
+        patch.object(
+            openai_adapter, "reformulate_for_voice_stream", side_effect=_track_reformulator
+        ),
+    ):
+        chunks = _drain_chunks(_stream_chat_completion(body, _FakeRequest()))
+
+    assert refmt_called == []
+    full = "".join(
+        json.loads(c[len("data: ") :].strip())["choices"][0]["delta"].get("content") or ""
+        for c in chunks
+        if c.startswith("data: ") and not c.startswith("data: [DONE]")
+    )
+    assert "Je ne peux pas traiter cette demande" in full
+
+
+def test_stream_reformulator_failure_falls_back_to_main_text() -> None:
+    """Si le reformulateur lève, on yield le main text strippé Markdown."""
+    body = {"messages": [{"role": "user", "content": "Q"}], "stream": True}
+    fake_events = _events(
+        {"type": "text", "content": "Main response **avec markdown**."},
+    )
+
+    def _failing_reformulator(*a: Any, **kw: Any):
+        async def _gen() -> AsyncIterator[str]:
+            raise RuntimeError("anthropic api down")
+            yield  # unreachable, but makes this an async generator
+
+        return _gen()
+
+    with (
+        patch.object(openai_adapter, "run_guarded_turn", return_value=fake_events),
+        patch.object(
+            openai_adapter,
+            "reformulate_for_voice_stream",
+            side_effect=_failing_reformulator,
+        ),
+    ):
+        chunks = _drain_chunks(_stream_chat_completion(body, _FakeRequest()))
+
+    full = "".join(
+        json.loads(c[len("data: ") :].strip())["choices"][0]["delta"].get("content") or ""
+        for c in chunks
+        if c.startswith("data: ") and not c.startswith("data: [DONE]")
+    )
+    # Fallback : main text, Markdown strippé
+    assert "Main response avec markdown." in full
+    assert "**" not in full
+    # [DONE] présent
+    assert chunks[-1] == "data: [DONE]\n\n"
+
+
+def test_stream_done_yielded_before_aclose() -> None:
+    """C : [DONE] doit arriver AVANT le aclose() du turn_gen.
+
+    On trace l'ordre via un generator qui logge dans aclose vs le
+    moment où chunks contient [DONE]."""
+    body = {"messages": [{"role": "user", "content": "Q"}], "stream": True}
+    order: list[str] = []
+
+    class _TracedGen:
+        def __init__(self, evs: list[dict[str, Any]]) -> None:
+            self._iter = iter(evs)
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            try:
+                return next(self._iter)
+            except StopIteration:
+                raise StopAsyncIteration from None
+
+        async def aclose(self):
+            order.append("aclose")
+
+    traced = _TracedGen([{"type": "text", "content": "ok"}])
+
+    with patch.object(openai_adapter, "run_guarded_turn", return_value=traced):
+
+        async def _drain_with_tracking() -> None:
+            async for c in _stream_chat_completion(body, _FakeRequest()):
+                if c == "data: [DONE]\n\n":
+                    order.append("done_yielded")
+
+        import asyncio
+
+        asyncio.run(_drain_with_tracking())
+
+    assert "done_yielded" in order
+    assert "aclose" in order
+    assert order.index("done_yielded") < order.index("aclose"), (
+        f"[DONE] doit être yieldé AVANT aclose() — order={order}"
+    )
+
+
 def test_stream_increments_voice_counters() -> None:
     body = {"messages": [{"role": "user", "content": "Q"}], "stream": True}
     fake_events = _events(
@@ -218,7 +406,8 @@ def test_stream_increments_voice_counters() -> None:
     assert snap["voice_sessions_total"] == 1
     assert snap["voice_custom_llm_calls"] == 1
     assert snap["voice_narration_chunks_emitted"] == 1
-    # voice_chars_tts couvre narration ("Je cherche le SIREN… ") + "Hello".
+    # voice_chars_tts couvre narration ("Je cherche le SIREN… ") +
+    # reformulé (mock "[REFORMULATED] Hello").
     assert snap["voice_chars_tts"] > 5
 
 
