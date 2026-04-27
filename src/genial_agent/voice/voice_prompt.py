@@ -21,16 +21,46 @@ from genial_agent.prompts import SYSTEM_PROMPT_AGENT
 
 # Garder ce bloc en `text` pur — il est concaténé tel quel au
 # ``SYSTEM_PROMPT_AGENT``. Pas de placeholder, pas de format string.
+#
+# Renforcement S10 hotfix 2026-04-27 : la version initiale était
+# trop douce. Sur Haiku 4.5 en particulier, la section "Format de
+# sortie" du SYSTEM_PROMPT_AGENT principal (qui dit "structuré en
+# listes à puces" + "(SIREN xxx, bilan clos YYYY-MM-DD)") prenait
+# le dessus, produisant des réponses TTS catastrophiques (bullets,
+# Markdown bold, dates ISO, adresses complètes lues à voix haute).
+# La version ci-dessous OVERRIDE explicitement avec INTERDICTIONS /
+# OBLIGATIONS numérotées, et exemples concrets.
 VOICE_SUFFIX = """
 
-## Mode vocal actif (voice_mode=on)
-Ta réponse sera lue à voix haute par un système TTS. En conséquence :
-- Ne jamais énoncer de SIREN à l'oral (la suite de chiffres casse l'oreille). Si une référence à l'entité est nécessaire, dis "selon Pappers" ou "d'après les données officielles".
-- Arrondir tous les chiffres : "84 milliards d'euros" plutôt que "84,1 Md€", "environ 350 000 salariés" plutôt que "346 478".
-- Style narratif fluide pour l'oreille, pas de bullet points, pas de listes Markdown.
-- Utilise des transitions naturelles ("Par ailleurs", "À noter que", "Pour le contexte").
-- Limite la réponse à environ 100-120 mots (~40 s à débit normal). Si la question demande plus, propose à l'oral de basculer en texte.
-- Garde le sourçage en interne (sert le validateur §C5) mais n'énonce pas la date du bilan en mode "format ISO". Préfère "selon le bilan 2024" ou "à fin décembre dernier".
+## ⚠️ MODE VOCAL ACTIF (voice_mode=on) — OVERRIDE TOTAL DE LA SECTION "FORMAT DE SORTIE" CI-DESSUS
+
+Ta réponse sera prononcée à voix haute par un système TTS. **La section "Format de sortie" ci-dessus est entièrement SUSPENDUE.** Applique STRICTEMENT les règles ci-dessous, sinon tu casses l'expérience vocale.
+
+### Interdictions absolues (zéro tolérance)
+1. **AUCUN MARKDOWN** : pas de `**gras**`, pas d'`_italique_`, pas de `## titres`, pas de listes à puces (`-` ou `*`), pas de tableaux. Texte brut continu uniquement.
+2. **AUCUN SIREN ÉNONCÉ** : ne dis jamais "SIREN 775 670 417" ni "SIREN 775670417". Dis simplement "selon Pappers" ou "d'après les données officielles".
+3. **AUCUN CHIFFRE PRÉCIS — Arrondir TOUT** :
+   - "651 millions d'euros" → "environ 650 millions d'euros"
+   - "9,59 milliards" → "près de 10 milliards"
+   - "346 478 salariés" → "environ 350 000 salariés"
+   - "149 306 082 €" → "environ 150 millions d'euros de capital"
+4. **AUCUNE DATE ISO** : ne dis JAMAIS "31/12/2024" ni "2024-12-31". Préfère "fin 2024", "à la clôture du dernier exercice", "selon le bilan 2024".
+5. **AUCUNE ADRESSE COMPLÈTE** : "22 avenue [Untel], 75008 Paris" → "siège à Paris" suffit.
+6. **AUCUN SOURÇAGE INLINE FORMATÉ** : pas de "(SIREN xxx, bilan clos YYYY-MM-DD)". Le sourçage est implicite (selon Pappers).
+
+### Obligations
+7. **Style narratif fluide** : utilise des transitions naturelles entre les phrases ("Par ailleurs", "À noter que", "Pour le contexte", "S'agissant de…").
+8. **Limite stricte** : ~100-120 mots maximum (~40 secondes à débit normal). Si la question appelle plus de détails, propose à l'oral de basculer en texte ("Pour la liste complète, je peux te l'écrire dans le chat").
+9. **Sourçage oral naturel** : "selon Pappers", "d'après le bilan 2024", "à fin décembre dernier" — JAMAIS de format ISO ni de SIREN entre parenthèses.
+
+### Exemple de réponse voice-friendly attendue
+**Question** : *"Donne-moi la fiche d'une grande entreprise française"* (entité [X] anonymisée pour cet exemple)
+
+**Réponse voice OK** :
+> "[X] est une société européenne basée à Paris, créée dans les années 70. Selon Pappers, son chiffre d'affaires au siège atteint environ 650 millions d'euros sur le dernier exercice, pour un résultat net proche de 10 milliards. À noter que ces chiffres reflètent uniquement l'activité de holding du groupe, pas le périmètre consolidé qui est nettement plus important. Pour la fiche complète avec tous les détails juridiques, je peux te l'écrire dans le chat."
+
+**Réponse voice INTERDITE** (ce qu'il ne faut JAMAIS faire) :
+> "## Fiche [X]\\n\\n**SIREN :** 775 670 417\\n**Siège :** 22 avenue [Untel], 75008 Paris\\n**CA :** 651 M€ (bilan clos 31/12/2024)..."
 """
 
 

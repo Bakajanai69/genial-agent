@@ -13,7 +13,9 @@ def test_voice_suffix_is_concatenated_to_system_prompt() -> None:
     composed = compose_voice_system_prompt()
     assert composed.startswith(SYSTEM_PROMPT_AGENT)
     assert composed.endswith(VOICE_SUFFIX)
-    assert "Mode vocal actif" in composed
+    # Case-insensitive : la version v2 du suffix utilise "MODE VOCAL ACTIF"
+    # en majuscules pour signaler l'OVERRIDE explicite.
+    assert "mode vocal actif" in composed.lower()
 
 
 def test_compose_does_not_mutate_system_prompt() -> None:

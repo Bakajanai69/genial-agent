@@ -255,7 +255,9 @@ def test_stream_propagates_voice_system_prompt() -> None:
     assert "system_prompt_override" in captured["kwargs"]
     spo = captured["kwargs"]["system_prompt_override"]
     assert isinstance(spo, str)
-    assert "Mode vocal actif" in spo
+    # Le suffix v2 utilise "MODE VOCAL ACTIF" en majuscules pour
+    # signaler l'OVERRIDE explicite de la section "Format de sortie".
+    assert "mode vocal actif" in spo.lower()
 
 
 def test_stream_session_id_uses_user_field_when_provided() -> None:
