@@ -188,46 +188,101 @@ disponible au runtime via `bootstrap_volume_from_bake`.
 
 > **Optionnel** — n'activer ce chantier qu'après gating §19.1 (cahier
 > des charges) respecté, MVP texte vert sur l'URL Railway prod.
+>
+> **Validé live 2026-04-27** : POC end-to-end OK depuis l'API
+> `simulate-conversation` ElevenLabs → ngrok local → Chainlit
+> `voice mode v2`. Détails et 2 gotchas découvertes ci-dessous.
 
-### Création de l'Eleven Agent
+### Gotchas découvertes au POC live (à respecter sinon ça ne marche pas)
 
-1. ElevenLabs dashboard → [Agents](https://elevenlabs.io/agents) →
-   « Create Agent ».
-2. **Voice** : Gaëlle (`tKaoyJLW05zqV0tIH9FD`). Sélecteur Guillaume
-   gérable plus tard côté dashboard si besoin.
-3. **Language** : `fr`. Override aussi côté widget (`override-language="fr"`).
-4. **LLM** : choisir « **Custom LLM** ».
-   - URL : `https://genial-agent-production.up.railway.app/v1/chat/completions`
-   - Model name : libre (suggéré `genial-agent-claude`).
-   - Headers : ajouter `Authorization` avec value `Bearer ${ELEVEN_AGENT_SHARED_TOKEN}`
-     (le `${...}` pointe sur le Workspace Secret du même nom — voir étape suivante).
-5. **Conversation flow** :
-   - Turn eagerness : **Patient** (laisse le temps de formuler une
-     question complexe U3).
-   - Soft timeout : `timeout_seconds=3.0`,
-     `message="Un instant, je consulte les données…"`,
-     `use_llm_generated_message=false`.
-6. **Security tab** :
-   - Authentication : `disabled` (agent public — la sécurité passe
-     par le Bearer côté custom LLM, pas par le widget).
-   - Allowlist domains :
-     - `genial-agent-production.up.railway.app`
-     - `localhost:8000`
-     - `localhost:8765`
-7. Sauvegarder. Récupérer l'`agent_xxxxxxxxxxxxxxxxxxxxx` depuis l'URL
-   du dashboard.
+1. **URL custom LLM = base `/v1`, PAS `/v1/chat/completions`.**
+   ElevenLabs **append automatiquement** `/chat/completions` à l'URL
+   qu'on lui fournit. Si on lui donne `…/v1/chat/completions`, il
+   appellera `…/v1/chat/completions/chat/completions` → 405.
+2. **TTS `model_id` requis pour un agent non-anglais.** Sans ça, la
+   création renvoie `400 Non-english Agents must use turbo or flash
+   v2_5`. Valeurs testées : `eleven_flash_v2_5` (recommandé : low
+   latency + qualité OK pour démo) ou `eleven_turbo_v2_5`.
 
-### Création du Workspace Secret
+### Création du Workspace Secret (API curl)
 
-1. ElevenLabs dashboard → **Workspace → Secrets** → « Add Secret ».
-2. Name : `ELEVEN_AGENT_SHARED_TOKEN`.
-3. Value : générer 32+ chars random :
+```bash
+TOKEN=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+echo "Token: $TOKEN"  # NOTE LE — il faut le copier dans Railway et .env
 
-   ```bash
-   python -c "import secrets; print(secrets.token_urlsafe(32))"
-   ```
+curl -sS -X POST \
+  -H "xi-api-key: $ELEVENLABS_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "{\"type\":\"new\",\"name\":\"ELEVEN_AGENT_SHARED_TOKEN\",\"value\":\"$TOKEN\"}" \
+  "https://api.elevenlabs.io/v1/convai/secrets"
+# Réponse : {"type":"stored","secret_id":"<secret_id>","name":"ELEVEN_AGENT_SHARED_TOKEN"}
+# NOTE le secret_id — il est utilisé dans la création de l'agent ci-dessous.
+```
 
-   Garder cette valeur — elle ira aussi dans Railway et `.env` local.
+Alternative dashboard : Workspace → Secrets → Add Secret.
+
+### Création de l'Eleven Agent (API curl)
+
+Avec le `secret_id` obtenu ci-dessus :
+
+```bash
+SECRET_ID="<secret_id retourné juste avant>"
+
+curl -sS -X POST \
+  -H "xi-api-key: $ELEVENLABS_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "$(cat <<EOF
+{
+  "name": "genial-agent-prod",
+  "conversation_config": {
+    "agent": {
+      "language": "fr",
+      "first_message": "Bonjour, je suis l'agent entreprises françaises. Pose-moi une question.",
+      "prompt": {
+        "prompt": "Tu transmets simplement la requête utilisateur au custom LLM Genial.",
+        "llm": "custom-llm",
+        "custom_llm": {
+          "url": "https://genial-agent-production.up.railway.app/v1",
+          "model_id": "genial-agent-claude",
+          "api_key": {"secret_id": "$SECRET_ID"}
+        }
+      }
+    },
+    "tts": {
+      "voice_id": "tKaoyJLW05zqV0tIH9FD",
+      "model_id": "eleven_flash_v2_5"
+    },
+    "turn": {
+      "turn_timeout": 8,
+      "mode": "turn",
+      "turn_eagerness": "patient"
+    },
+    "conversation": {"max_duration_seconds": 300}
+  },
+  "platform_settings": {
+    "auth": {
+      "enable_auth": false,
+      "allowlist": [
+        {"hostname": "genial-agent-production.up.railway.app"},
+        {"hostname": "localhost:8000"},
+        {"hostname": "localhost:8765"}
+      ]
+    }
+  }
+}
+EOF
+)" \
+  "https://api.elevenlabs.io/v1/convai/agents/create"
+# Réponse : {"agent_id":"agent_xxxxxxxxxxxxxxxxxxxxx", ...}
+# NOTE l'agent_id — il va dans Railway et .env (ELEVEN_AGENT_ID).
+```
+
+Alternative dashboard : [Agents](https://elevenlabs.io/agents) →
+« Create Agent ». Dans ce cas, **bien renseigner `model_id` côté
+TTS et l'URL custom LLM en `/v1` strict** (cf. gotchas ci-dessus).
+Auth headers : pas besoin d'ajouter manuellement le Bearer —
+ElevenLabs envoie automatiquement le secret référencé via
+`api_key.secret_id` en `Authorization: Bearer …`.
 
 ### Variables Railway additionnelles (S10)
 
@@ -249,18 +304,36 @@ Dans Railway → Variables :
 Après deploy avec `ENABLE_VOICE_MODE=true` :
 
 ```bash
-# 1) Vérifier que /voice-meta.html est servi (et contient l'agent-id).
+# 1) /voice-meta.html servi avec l'agent-id correct.
 curl -s https://genial-agent-production.up.railway.app/voice-meta.html | grep "data-agent-id"
 
-# 2) Vérifier que /v1/chat/completions exige l'auth (sans token → 401).
+# 2) /v1/chat/completions exige l'auth (sans token → 401).
 curl -i -X POST https://genial-agent-production.up.railway.app/v1/chat/completions \
      -H "Content-Type: application/json" \
      -d '{"messages":[{"role":"user","content":"ping"}],"stream":true}' | head -5
 # Attendu : HTTP/1.1 401 Unauthorized
 
-# 3) Avec le bon token + Eleven envoie ses chunks. Côté navigateur,
-#    cliquer sur le bouton micro flottant et tester "Donne-moi la
-#    fiche LVMH" en parlant.
+# 3) Test live SANS audio, hors-Pappers, via simulate-conversation
+#    ElevenLabs (côté nous : pas besoin d'audio mic, on valide juste
+#    que ElevenLabs hit notre endpoint et parse le SSE).
+curl -sS --max-time 90 -X POST \
+  -H "xi-api-key: $ELEVENLABS_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "simulation_specification": {
+      "simulated_user_config": {
+        "first_message": "Quelle est la capitale de la France ?"
+      }
+    },
+    "new_turns_limit": 2
+  }' \
+  "https://api.elevenlabs.io/v1/convai/agents/$ELEVEN_AGENT_ID/simulate-conversation"
+# Attendu : 3 turns dans simulated_conversation, l'agent refuse poliment
+# (hors-scope) sans appel Pappers (vérifier /stats : pappers_calls_today=0).
+
+# 4) Test audio réel : ouvrir https://elevenlabs.io/app/talk-to?agent_id=$ELEVEN_AGENT_ID
+#    et parler dans le mic. Ou côté chat Genial : cliquer sur le micro
+#    flottant en bas à droite.
 ```
 
 Couper le voice mode à chaud si problème en prod : passer
