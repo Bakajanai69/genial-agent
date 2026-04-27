@@ -233,7 +233,7 @@ opérationnelles.
 | S09.5 | [Gestion robuste des payloads MCP volumineux](./S09.5-mcp-payload-handling.md) | 🟡 en cours (dev done + review fixes) | S09 (dogfooding) | — |
 | S09.6 | [Workaround tools MCP & cache crédits persistant (+ persistance conversations)](./S09.6-mcp-workaround-and-credit-cache.md) | 🟡 phase 2 dev done (review pending) | S09.5 (post-livraison) | — |
 | S09.7 | [Robustesse extraction MCP & UX des caps](./S09.7-extraction-robustness-and-cap-ux.md) | 🟡 dev done 2026-04-26 + 18 hotfixes/improvements live (review pending) | S09.5, S09.6 | — |
-| S10 | [🎯 Stretch : voice mode Eleven Agents](./S10-voice-brief.md) | 🟡 dev done 2026-04-27 (gating opérationnel pending) | S09 | — |
+| S10 | [🎯 Stretch : voice mode Eleven Agents](./S10-voice-brief.md) | 🟡 dev done + 5 hotfixes POC live 2026-04-27 (review pending) | S09 | — |
 
 **Légende** : ⬜ à faire · 🟡 en cours · ✅ approuvée · ⏸ bloquée
 

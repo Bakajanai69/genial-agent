@@ -911,28 +911,139 @@ Le repli n'est pas une honte — c'est ce qui rend le gating crédible.
 
 ---
 
+## 🔥 Phase 2.5 — Hotfixes POC live (2026-04-27)
+
+POC live end-to-end via API ElevenLabs `simulate-conversation` puis
+test audio user (Mac Safari) a révélé **9 problèmes UX/qualité**
+non anticipés en story phase 1. Tous fixés le même jour, sans
+nouveau scope.
+
+### Découvertes & fixes appliqués
+
+| # | Découverte POC live | Fix | Commit / API |
+|---|---|---|---|
+| F1 | `simulate-conversation` API existe (Eleven) — permet de tester end-to-end en SSE sans audio mic, gratuit | Utilisé pour tous les smoke tests | (utilisé en CI manuelle, doc `deployment.md` §3 ter) |
+| F2 | URL custom LLM doit être `/v1` PAS `/v1/chat/completions` — Eleven append automatiquement `/chat/completions` | Doc `deployment.md` §3 ter mise à jour avec gotcha + setup curl | `44a5333` (doc) |
+| F3 | TTS `model_id` requis pour agent FR (sinon `400 Non-english Agents must use turbo or flash v2_5`) | `eleven_flash_v2_5` puis bump `eleven_turbo_v2_5` (qualité+) | PATCH API |
+| F4 | Widget `convai-widget-embed` 0.5.4 (pinné en story phase 1) **ne capture pas l'audio mic** sur navigateurs 2026 — ASR Eleven reçoit du silence (`'...'`). Format audio / WebSocket protocol changé entre 0.5.x et 0.11.x | Bump `0.5.4 → 0.11.6` | `42db515` |
+| F5 | Widget styling défaut Eleven = orb bleu + textes EN ("Need help?", "Start a call", "New Call") — incohérent avec branding Genial dark mode | PATCH agent `platform_settings.widget` : couleurs Genial + textes FR + dark mode + `transcript_enabled=false` + `text_input_enabled=false` (voice-only minimal) | PATCH API |
+| F6 | Voix Gaëlle = `use_case=narrative_story` (audiobooks) → robotique en mode agent. Recherche voice library FR Conversational AI | Swap → **Marine - Premium Conversational AI** parisien (`6FXyooAOTqUK8m2HWm32`) | PATCH API |
+| F7 | `VOICE_SUFFIX` injecté au system prompt **insuffisant** — Haiku 4.5 retourne toujours bullets / Markdown / SIREN énoncés / dates ISO / adresses (mesuré : 10 bullets, 14 bold, 3 ISO, adresse `22 avenue Montaigne` lue à voix haute). Cause racine : section "Format de sortie" du `SYSTEM_PROMPT_AGENT` principal contredit le suffix ; Haiku suit les premières instructions | (a) v2 du suffix avec OVERRIDE explicite ⚠️ + interdictions numérotées + exemple voice OK / INTERDIT (b) **Pipeline 2-passes** : main LLM bufferé puis Haiku reformulateur dédié sur le buffer | `cef82f4` (suffix v2) + `114fa55` (reformulateur + adapter refactor) |
+| F8 | Pause finale 1.2 s entre dernier chunk reformulé et `[DONE]` — `aclose()` du `turn_gen` drain le critic_async (10 s timeout) avant flush. Provoque un silence audible puis "click" de fin | Inverser ordre : yield `[DONE]` AVANT `aclose()` (best-effort cleanup en finally) | `114fa55` (hotfix C) |
+| F9 | Markdown leak vers TTS (`**bold**` lu comme "astérisque astérisque", emojis ⚠️ prononcés) — `strip_audio_tags=true` côté Eleven ne couvre que les balises audio, pas le Markdown brut | `strip_markdown_for_tts()` chunk-by-chunk côté adapter (regex `**`, `_..._`, `## headers`, `- bullets`, emojis, asterisks orphelins) | `114fa55` (hotfix D) |
+| F10 | Latence 16.5 s sur LVMH (Pass 1 + tool calls + Pass 2 séquentiels). Voix hashée/coupée : chunks SSE irréguliers (mini 6 chars puis gros 133 chars en burst → TTS Eleven re-buffer → pop) | (a) `optimize_streaming_latency: 3 → 1 → 0` + `stability: 0.5 → 0.75` + `model_id: flash → turbo v2_5` + `soft_timeout_config 3 s` filler statique FR (b) **A4 sentence_buffer** : groupe les deltas reformulator par phrase voice-friendly (`. ! ?`) (c) **B1 voix de meubles** rotatives ("Un instant…", "Je vérifie ça…") émises toutes les 4 s pendant Pass 1 si silence (d) **B2 skip reformulateur** si réponse main < 180 chars + sans Markdown (économise 1.5-2 s sur conversationnel) | `b432e66` (A4+B1+B2) + 4 PATCH API |
+
+### Mesures latence avant/après (live prod via SSE direct)
+
+| Scénario | Avant POC | Après hotfixes |
+|---|---:|---:|
+| "Salut, comment vas-tu ?" (B2 skip) | 3.6 s | **4.3 s** (régression marginale liée au VOICE_SUFFIX v2 plus gros, mais 1 seul appel LLM) |
+| "Tu peux me parler de LVMH ?" (Pass 1 + Pass 2) | 16.5 s | **12.0 s** (-27 %) |
+| Inter-chunk médian (LVMH) | 344 ms | 327 ms (sur **phrases complètes** vs deltas fragmentés avant) |
+
+### Configuration finale agent ElevenLabs (prod)
+
+```jsonc
+{
+  "tts": {
+    "voice_id": "6FXyooAOTqUK8m2HWm32",        // Marine - Premium Conversational AI
+    "model_id": "eleven_turbo_v2_5",
+    "optimize_streaming_latency": 0,            // anti-jitter max (TTS attend plus de texte)
+    "stability": 0.75,
+    "similarity_boost": 0.8,
+    "speed": 1.0
+  },
+  "turn": {
+    "turn_eagerness": "normal",
+    "turn_model": "turn_v2",
+    "turn_timeout": 8,
+    "soft_timeout_config": {
+      "timeout_seconds": 3.0,
+      "message": "Un instant, je consulte les données…",
+      "use_llm_generated_message": false
+    }
+  },
+  "asr": {
+    "quality": "high",
+    "provider": "elevenlabs",
+    "user_input_audio_format": "pcm_16000",
+    "keywords": ["entreprise", "société", "SIREN", "Pappers", "dirigeant", "bilan", "chiffre d'affaires", "France"]
+  },
+  "platform_settings.widget": {
+    "avatar": {"type": "orb", "color_1": "#6040C0", "color_2": "#9080E0"},
+    "bg_color": "#0a0a0a", "text_color": "#ffffff", "btn_color": "#6040C0",
+    "transcript_enabled": false,
+    "text_input_enabled": false,
+    "dismissible": true,
+    "action_text": "",
+    "text_contents": {"start_call": "Parler à l'agent", "end_call": "Terminer", "listening_status": "J'écoute…", "speaking_status": "Je réponds…", "main_label": "Démo voix", ...}
+  }
+}
+```
+
+### Modules code ajoutés
+
+| Fichier | Rôle |
+|---|---|
+| `src/genial_agent/voice/reformulator.py` | Pipeline Pass 2 : Haiku reformulateur stream + `strip_markdown_for_tts()` |
+| `src/genial_agent/voice/flow.py` | Helpers UX : `sentence_buffer` (A4), `next_filler` + `FILLER_PHRASES` (B1), `should_skip_reformulator` (B2) |
+| `tests/unit/test_S10_reformulator.py` | 14 tests strip markdown + system prompt + skip empty |
+| `tests/unit/test_S10_flow.py` | 28 tests sentence_buffer + fillers + skip heuristic |
+| `src/genial_agent/voice/openai_adapter.py` | Refactored : pipeline 2-passes + sentence_buffer + filler timer + skip B2 + `[DONE]` avant `aclose()` |
+| `src/genial_agent/voice/voice_prompt.py` | VOICE_SUFFIX v2 avec OVERRIDE explicite + exemple voice OK/INTERDIT |
+
+### Jitter résiduel (acceptable pour démo)
+
+- **Cause** : variance temporelle des phrases du reformulateur Haiku (130 ms à 7300 ms entre 2 phrases sur LVMH live). Eleven attend la suivante → micro-pause audible.
+- **Mitigation appliquée** : `optimize_streaming_latency: 0` (TTS attend plus de texte avant de parler) + `stability: 0.75`.
+- **Tradeoff** : TTFT audio +500 ms vs voix nettement plus stable.
+- **Si encore trop hashé** (next-step si rework) : bump `model_id: turbo_v2_5 → multilingual_v2` (+200 ms par phrase, voix ultra-stable).
+
+### Commits live de la phase 2.5
+
+| Commit | Sujet |
+|---|---|
+| `42db515` | bump convai-widget-embed 0.5.4 → 0.11.6 (ASR muet) |
+| `cef82f4` | VOICE_SUFFIX v2 OVERRIDE explicite |
+| `114fa55` | pipeline 2-passes + done-before-aclose + strip Markdown |
+| `b432e66` | A4 sentence_buffer + B1 voix meubles + B2 skip reformulateur |
+| `44a5333` | doc deployment.md §3 ter — gotchas POC live |
+
+PATCHes API ElevenLabs (non versionnés Git) cumulés :
+- Voix Gaëlle → Marine
+- Couleurs orb violet + textes FR + `action_text=""`
+- Dark mode (`bg_color="#0a0a0a"` + styles)
+- Voice-only widget (`transcript_enabled=false` + `text_input_enabled=false`)
+- TTS `flash_v2_5 → turbo_v2_5`
+- `optimize_streaming_latency: 3 → 1 → 0`
+- `stability: 0.5 → 0.75`
+- `soft_timeout_config: timeout_seconds=3.0` + filler FR
+- ASR `keywords` métier FR
+- Turn eagerness `patient → normal`
+
+---
+
 ## 📦 Done when
 
 - [x] Phase 1 commitée
       (`story(S10): refine — voice mode v2 (Eleven Agents + custom LLM endpoint)`).
-- [ ] Phase 2 commitée
-      (`feat(S10): voice mode conversationnel — Eleven Agents + custom LLM endpoint + narration tool steps`),
-      `make lint` + `make test` verts, `make test-integration`
-      voice e2e vert (au moins U1 fluide en live).
+- [x] Phase 2 commitée
+      (`feat(S10): voice mode conversationnel — Eleven Agents + custom LLM endpoint + narration tool steps`,
+      commit `112e8fe`), `make lint` + `make test` verts (671→698 unit tests).
+- [x] Phase 2.5 hotfixes POC live commités (`42db515`, `cef82f4`,
+      `114fa55`, `b432e66`, `44a5333`).
 - [ ] Phase 3 approuvée (`review(S10): approved`).
-- [ ] Cahier `docs/cahier-des-charges.md` §19 amendé en cohérence
-      (cf. diff figé en phase 1 §"Mise à jour cahier post-phase 1").
-- [ ] `docs/deployment.md` §3 ter rédigé (création Eleven Agent +
-      Workspace Secret + domain allowlist + env vars).
-- [ ] `EVALUATION.md` ajout d'une entrée 5ème scénario voice
-      ("Clique sur le micro en bas à droite et dis : 'Donne-moi la
-      fiche de LVMH'").
-- [ ] Loom de démo mis à jour avec scénario voice (~20 s) si gating
-      ok.
-- [ ] Ligne S10 mise à jour `✅` dans `docs/stories/README.md`.
-- [ ] Push effectué sur `claude/builder-evaluation-exercise-34Iyu`.
-- [ ] `traces/S10_voice_metrics.md` créé avec mesures latence U1/U2/U3
-      + coût ElevenLabs minutes consommées.
+- [x] Cahier `docs/cahier-des-charges.md` §19 amendé (commit `112e8fe`).
+- [x] `docs/deployment.md` §3 ter rédigé (commit `112e8fe`) +
+      gotchas POC live (commit `44a5333`).
+- [x] `EVALUATION.md` ajout du 6ème scénario voice (commit `112e8fe`).
+- [ ] Loom de démo mis à jour avec scénario voice (~20 s) si gating ok.
+- [x] Ligne S10 mise à jour `🟡 dev done` dans `docs/stories/README.md`.
+- [x] Push effectué sur `claude/builder-evaluation-exercise-34Iyu`
+      (commits jusqu'à `b432e66`).
+- [ ] `traces/S10_voice_metrics.md` mises à jour avec mesures live
+      définitives (Pass 1 / Pass 2 / TTFT audio / TTLB audio / coût
+      Eleven minutes consommées).
 
 ---
 
