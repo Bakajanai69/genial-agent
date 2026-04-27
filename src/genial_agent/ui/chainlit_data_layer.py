@@ -111,6 +111,12 @@ def _resolve_owner_id() -> str:
         user = cl.user_session.get("user")
         identifier = getattr(user, "identifier", None)
         if isinstance(identifier, str) and identifier:
+            logger.info(
+                "data_layer_owner_resolved",
+                priority=1,
+                source="user_session.user",
+                identifier_prefix=identifier[:8],
+            )
             return identifier
     except Exception:  # noqa: BLE001, S110 — fallback
         pass
@@ -124,7 +130,14 @@ def _resolve_owner_id() -> str:
         if cookies:
             match = _OWNER_COOKIE_RE.search(cookies)
             if match:
-                return match.group(1)
+                identifier = match.group(1)
+                logger.info(
+                    "data_layer_owner_resolved",
+                    priority=2,
+                    source="environ.HTTP_COOKIE",
+                    identifier_prefix=identifier[:8],
+                )
+                return identifier
     except Exception:  # noqa: BLE001, S110
         pass
 
@@ -134,6 +147,12 @@ def _resolve_owner_id() -> str:
 
         owner = cl.user_session.get(SESSION_OWNER_KEY)
         if isinstance(owner, str) and owner:
+            logger.info(
+                "data_layer_owner_resolved",
+                priority=3,
+                source="user_session.SESSION_OWNER_KEY",
+                identifier_prefix=owner[:8],
+            )
             return owner
     except Exception:  # noqa: BLE001, S110
         pass
@@ -144,6 +163,7 @@ def _resolve_owner_id() -> str:
     # pré-fix v3). Si on retourne ANONYMOUS_USER_ID ici, list_threads
     # appelé hors contexte WebSocket leakerait les threads anonymous
     # à tout le monde.
+    logger.info("data_layer_owner_resolved", priority=4, source="sentinel")
     return "__no_owner_resolved__"
 
 
@@ -309,6 +329,8 @@ class AnonymousSQLiteDataLayer(BaseDataLayer):
             logger.info(
                 "chainlit_data_layer_thread_access_denied",
                 thread_id=thread_id,
+                owner_prefix=(owner or "")[:8],
+                thread_owner_prefix=(thread_owner or "")[:8],
             )
             return None
 
@@ -353,6 +375,13 @@ class AnonymousSQLiteDataLayer(BaseDataLayer):
         now = _now_iso()
         owner = _resolve_owner_id()
         effective_user_id = user_id or owner
+        logger.info(
+            "data_layer_update_thread",
+            thread_id=thread_id,
+            owner_prefix=(owner or "")[:8],
+            effective_user_id_prefix=(effective_user_id or "")[:8],
+            user_id_provided=user_id is not None,
+        )
         async with conn.execute(
             "SELECT id, user_id FROM threads WHERE id = ?",
             (thread_id,),

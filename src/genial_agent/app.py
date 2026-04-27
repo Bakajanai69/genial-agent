@@ -154,7 +154,20 @@ async def auth_callback(headers: object) -> cl.User | None:
     ``Awaitable[Optional[User]]`` (signature documentée
     ``async def header_auth_callback(headers: Headers)``).
     """
+    # Log inconditionnel pour diagnostic : permet de confirmer si
+    # Chainlit invoque effectivement ce callback. Si on ne voit jamais
+    # cet event en prod, c'est que le callback n'est jamais appelé →
+    # bug ailleurs (config Chainlit, ordre middleware, etc.).
     cookie_header = headers.get("cookie", "") if hasattr(headers, "get") else ""
+    has_owner_cookie = "genial_owner_id=" in cookie_header
+    headers_keys = list(headers.keys()) if hasattr(headers, "keys") else type(headers).__name__
+    logger.info(
+        "auth_callback_invoked",
+        has_owner_cookie=has_owner_cookie,
+        cookie_header_len=len(cookie_header),
+        header_keys_sample=headers_keys[:8] if isinstance(headers_keys, list) else headers_keys,
+    )
+
     match = _OWNER_COOKIE_RE_AUTH.search(cookie_header) if cookie_header else None
     if match:
         logger.info("auth_user_resolved_from_cookie", identifier_prefix=match.group(1)[:8])
