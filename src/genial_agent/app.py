@@ -70,6 +70,7 @@ from genial_agent.ui.entity_tracker import (  # noqa: E402
 from genial_agent.ui.events import TurnState, dispatch_event  # noqa: E402
 from genial_agent.ui.post_process import linkify_sirens, model_badge  # noqa: E402
 from genial_agent.ui.starters import STARTERS  # noqa: E402
+from genial_agent.ui.thread_resume import reconstruct_state_from_steps  # noqa: E402
 from genial_agent.voice.mount import mount_voice_routes  # noqa: E402
 
 # S07 — configurer structlog JSON + monter /health et /stats AVANT que
@@ -312,27 +313,47 @@ async def on_chat_start() -> None:
 async def on_chat_resume(thread: dict) -> None:
     """Reprise d'une conversation existante depuis la sidebar Chainlit.
 
-    Sans ce hook, Chainlit affiche les messages historiques du thread
-    mais **désactive la chat input** — l'utilisateur ne peut plus
-    écrire de nouveau message dans la conversation reprise.
+    Sans ce hook, Chainlit afficherait les messages historiques du
+    thread mais désactiverait la chat input — l'utilisateur ne pourrait
+    plus écrire de nouveau message.
 
-    On réinitialise les variables de session essentielles
-    (``state``, ``entity_banner_msg``, ``credits_low_banner_shown``,
-    ``SESSION_OWNER_KEY``) pour qu'``on_message`` fonctionne.
+    Comportement implémenté :
 
-    **Limite assumée** : on ne reconstruit pas le ``ConversationState``
-    historique à partir des steps stockés. Conséquence : l'agent
-    reprend "from scratch" sur le prochain message — il ne se souvient
-    pas du contexte des tours précédents (multi-turn cross-session).
-    Acceptable pour le scope démo (la sidebar sert d'historique côté
-    UX, pas de continuité logique côté agent). À améliorer si besoin
-    en parsant ``thread["steps"]`` pour reconstruire ``state.messages``.
+    1. ``_init_session_defaults`` pose les défauts session (state vide,
+       entity_banner_msg None, etc.) → la chat input est active.
+    2. ``reconstruct_state_from_steps`` parse les ``thread["steps"]``
+       et reconstruit ``state.messages`` au format Anthropic
+       (alternance user/assistant garantie, cap
+       ``MAX_RESUMED_MESSAGES`` pour ne pas saturer le token budget).
+    3. Le state reconstruit remplace le state vide → l'agent voit
+       l'historique conversationnel et peut résoudre les pronoms
+       multi-turn cross-session.
+
+    Tout le bloc reconstruction est wrap dans un ``try/except`` : en
+    cas d'erreur de parsing inattendue, on retombe sur le ``state``
+    neuf posé par ``_init_session_defaults`` — l'utilisateur perd la
+    continuité conversationnelle mais peut quand même écrire et
+    l'agent ne plante pas.
     """
     _init_session_defaults()
-    logger.info(
-        "ui_chat_resumed",
-        thread_id=thread.get("id") if isinstance(thread, dict) else None,
-    )
+    thread_id = thread.get("id") if isinstance(thread, dict) else None
+    try:
+        steps = thread.get("steps") if isinstance(thread, dict) else None
+        rebuilt = reconstruct_state_from_steps(steps)
+        if rebuilt.messages:
+            cl.user_session.set("state", rebuilt)
+        logger.info(
+            "ui_chat_resumed",
+            thread_id=thread_id,
+            messages_restored=len(rebuilt.messages),
+        )
+    except Exception as exc:  # noqa: BLE001 — fallback explicite
+        logger.warning(
+            "ui_chat_resume_reconstruct_failed",
+            thread_id=thread_id,
+            error_type=type(exc).__name__,
+            error_msg=str(exc)[:200],
+        )
 
 
 @cl.on_message
