@@ -61,7 +61,7 @@ ElevenLabs (prod)" pour le payload complet.
 Key params :
 - Voice : Marine - Premium Conversational AI (`6FXyooAOTqUK8m2HWm32`)
 - Model : `eleven_turbo_v2_5`
-- `optimize_streaming_latency: 0` (anti-jitter max, TTFT audio +500 ms acceptable)
+- `optimize_streaming_latency: 1` (compromis TTFT/jitter — PATCH A=0 testé live puis reverted le 2026-04-27 : pas d'amélioration audible + latence ressentie plus lente)
 - `stability: 0.75` + `similarity_boost: 0.8`
 - `soft_timeout_config: timeout_seconds=3.0` + filler statique FR
 
@@ -119,4 +119,5 @@ curl -sS -H "xi-api-key: $ELEVENLABS_API_KEY" \
 | ~05:30 | Pipeline 2-passes + done-before-aclose + strip Markdown | `114fa55` |
 | ~05:50 | A1+A2+A3+B3 (TTS turbo, stability, latency, soft timeout) | API (× 1 PATCH) |
 | ~06:00 | A4+B1+B2 (sentence_buffer + fillers + skip) | `b432e66` |
-| ~06:10 | A finale : `optimize_streaming_latency=0` (anti-jitter) | API |
+| ~06:10 | PATCH A : `optimize_streaming_latency=0` (anti-jitter test) | API |
+| ~06:30 | **Revert PATCH A → 1** (test live : pas d'effet audible + ressenti plus lent) | API |

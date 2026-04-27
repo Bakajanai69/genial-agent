@@ -948,7 +948,7 @@ nouveau scope.
   "tts": {
     "voice_id": "6FXyooAOTqUK8m2HWm32",        // Marine - Premium Conversational AI
     "model_id": "eleven_turbo_v2_5",
-    "optimize_streaming_latency": 0,            // anti-jitter max (TTS attend plus de texte)
+    "optimize_streaming_latency": 1,            // compromis TTFT/jitter (PATCH A=0 testé puis reverted — pas d'effet observé + ressenti plus lent)
     "stability": 0.75,
     "similarity_boost": 0.8,
     "speed": 1.0
@@ -995,8 +995,8 @@ nouveau scope.
 ### Jitter résiduel (acceptable pour démo)
 
 - **Cause** : variance temporelle des phrases du reformulateur Haiku (130 ms à 7300 ms entre 2 phrases sur LVMH live). Eleven attend la suivante → micro-pause audible.
-- **Mitigation appliquée** : `optimize_streaming_latency: 0` (TTS attend plus de texte avant de parler) + `stability: 0.75`.
-- **Tradeoff** : TTFT audio +500 ms vs voix nettement plus stable.
+- **Mitigation appliquée** : `optimize_streaming_latency: 1` (compromis TTFT / stabilité) + `stability: 0.75`.
+- **PATCH A=0 testé puis reverted** (2026-04-27) : test live n'a pas montré d'amélioration audible significative + ressenti plus lent côté user → retour à `1`. Note : la latence supplémentaire perçue avec `0` était plus impactante UX que le gain anti-jitter.
 - **Si encore trop hashé** (next-step si rework) : bump `model_id: turbo_v2_5 → multilingual_v2` (+200 ms par phrase, voix ultra-stable).
 
 ### Commits live de la phase 2.5
@@ -1015,7 +1015,7 @@ PATCHes API ElevenLabs (non versionnés Git) cumulés :
 - Dark mode (`bg_color="#0a0a0a"` + styles)
 - Voice-only widget (`transcript_enabled=false` + `text_input_enabled=false`)
 - TTS `flash_v2_5 → turbo_v2_5`
-- `optimize_streaming_latency: 3 → 1 → 0`
+- `optimize_streaming_latency: 3 → 1 → 0 → 1` (revert : `0` testé live n'apportait rien d'audible et augmentait la latence perçue)
 - `stability: 0.5 → 0.75`
 - `soft_timeout_config: timeout_seconds=3.0` + filler FR
 - ASR `keywords` métier FR
